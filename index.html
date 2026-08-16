@@ -94,6 +94,23 @@ FIRESTORE_RULES (paste into Firestore > Rules):
       match /counters/{id} { allow read, write: if isSuperAdmin() || isStaff(); }
       match /salesPipeline/{id} { allow read, write: if isSuperAdmin() || isStaff(); }
       match /gymSettings/{id} { allow read: if isSignedIn(); allow write: if isSuperAdmin(); }
+
+      // Public on purpose: this is the ONLY doc anyone can read without being
+      // logged in. It just answers "has a Super Admin been created yet?" so
+      // the app can show the right screen (bootstrap vs. login) and check
+      // that Firebase is reachable — before login, nothing else in this
+      // rules file is readable, which is what a probe/bootstrap check needs
+      // to work around.
+      match /system/{id} { allow read: if true; allow write: if isSignedIn(); }
+
+      // Catch-all for any new collection added in a future update that
+      // isn't listed above yet — Super Admin gets access automatically,
+      // so most future features won't need a rules change. Doesn't loosen
+      // anything above: rules combine with OR, and staff/trainer already
+      // only have exactly the access spelled out in their own match blocks.
+      match /{document=**} {
+        allow read, write: if isSuperAdmin();
+      }
     }
   }
 
@@ -363,7 +380,12 @@ function withTimeout(promise, ms) {
 async function probeFirebase() {
   if (!auth || !db) return false;
   try {
-    await withTimeout(db.collection("users").limit(1).get(), 5000);
+    // Deliberately reads the public system/meta doc, NOT a protected
+    // collection like "users" — those correctly require login per the
+    // security rules, so probing them here would always fail (and did:
+    // this was the bug behind the app always showing "Local mode" even
+    // with Firebase fully and correctly configured).
+    await withTimeout(db.collection("system").doc("meta").get(), 5000);
     return true;
   } catch (e) {
     console.warn("Firebase not reachable — running in local-only mode.", e.message);
@@ -584,7 +606,7 @@ async function loadAllFor(route){
   } else if(route === 'admin/sales' || route === 'staff/sales'){
     c.salesPipeline = await getCollection('salesPipeline');
   } else if(route === 'admin/invoices'){
-    c.invoices = await getCollection('invoices');
+    [c.invoices, c.gymSettings] = await Promise.all([getCollection('invoices'), getSingletonDoc('gymSettings', 'main')]);
   } else if(route === 'admin/plans'){
     [c.plans, c.ptPlans] = await Promise.all([getCollection('plans'), getCollection('ptPlans')]);
   } else if(route === 'admin/users'){
@@ -686,7 +708,19 @@ async function warmAndCheckExpiry(){
   await runAutoExpireCheck();
 }
 async function checkNeedsBootstrap(){
-  const users = await getCollection('users');
+  // Same reasoning as probeFirebase: "users" requires login to read, so we
+  // can't query it to decide whether a Super Admin exists yet. Instead we
+  // check the public system/meta doc, which the bootstrap flow sets once
+  // the first Super Admin is created.
+  if(firebaseReady){
+    try{
+      const doc = await withTimeout(db.collection('system').doc('meta').get(), 6000);
+      return !(doc.exists && doc.data().hasSuperAdmin);
+    }catch(e){
+      console.warn('Could not check bootstrap status from the cloud — using local cache.', e);
+    }
+  }
+  const users = LocalStore.getAll('users');
   return !users.some(u=>u.role==='super_admin');
 }
 
@@ -701,6 +735,7 @@ async function handleBootstrapSubmit(e){
     if(firebaseReady){
       const cred = await auth.createUserWithEmailAndPassword(email, password);
       await setDocumentWithId('users', cred.user.uid, { name, email, role:'super_admin', createdAt:new Date().toISOString() });
+      await setDocumentWithId('system', 'meta', { hasSuperAdmin: true });
       // initCloudAuth's onAuthStateChanged listener picks this up from here.
     } else {
       const rec = LocalStore.add('users', { name, email, password, role:'super_admin', createdAt:new Date().toISOString() });
@@ -715,28 +750,50 @@ async function handleBootstrapSubmit(e){
   }
 }
 
+// Logs in via the built-in local session — works regardless of whether
+// Firebase is configured, reachable, or has Email/Password sign-in turned
+// on yet. Used for the guaranteed default admin, and as the fallback path
+// whenever Firebase itself isn't ready to authenticate anyone.
+async function loginLocally(email, password){
+  const users = LocalStore.getAll('users');
+  const u = users.find(x=>x.email.toLowerCase()===email.toLowerCase() && x.password===password);
+  if(!u) throw new Error('Invalid email or password.');
+  LocalStore.setSingleton('session', { userId: u.id });
+  state.currentUser = { uid: u.id, isLocal:true };
+  state.profile = { id: u.id, name:u.name, email:u.email, role:u.role };
+  await warmAndCheckExpiry();
+  state.route = routeForRole(u.role);
+  await loadRoute();
+}
+
 async function handleLogin(e){
   e.preventDefault();
   const email = document.getElementById('login-email').value.trim();
   const password = document.getElementById('login-password').value;
   const errEl = document.getElementById('login-error');
   errEl.textContent = '';
+
+  // The default admin always works this way, on purpose — it's the
+  // guaranteed way in, whether Firebase is fully set up yet or not.
+  if(email.toLowerCase() === DEFAULT_ADMIN.email.toLowerCase() && password === DEFAULT_ADMIN.password){
+    ensureDefaultAdmin();
+    try{ await loginLocally(email, password); }catch(err){ errEl.textContent = err.message; }
+    return;
+  }
+
   try{
     if(firebaseReady){
       await auth.signInWithEmailAndPassword(email, password);
     } else {
-      const users = LocalStore.getAll('users');
-      const u = users.find(x=>x.email.toLowerCase()===email.toLowerCase() && x.password===password);
-      if(!u) throw new Error('Invalid email or password.');
-      LocalStore.setSingleton('session', { userId: u.id });
-      state.currentUser = { uid: u.id, isLocal:true };
-      state.profile = { id: u.id, name:u.name, email:u.email, role:u.role };
-      await warmAndCheckExpiry();
-      state.route = routeForRole(u.role);
-      await loadRoute();
+      await loginLocally(email, password);
     }
   }catch(err){
-    errEl.textContent = 'Invalid email or password.';
+    // If Firebase can't authenticate anyone yet (Email/Password provider
+    // not enabled in the console — auth/configuration-not-found — or any
+    // other auth error), fall back to checking the local account list
+    // instead of just showing a raw Firebase error.
+    try{ await loginLocally(email, password); }
+    catch{ errEl.textContent = 'Invalid email or password.'; }
   }
 }
 
@@ -775,7 +832,8 @@ function initCloudAuth(){
         }
       } else {
         state.currentUser = null; state.profile = null;
-        state.needsBootstrap = await checkNeedsBootstrap();
+        ensureDefaultAdmin(); // guarantees a working login regardless of Firebase's auth state
+        state.needsBootstrap = false; // login is always the entry point — the default admin gets you in
         state.route = 'login';
       }
     } finally {
@@ -1249,10 +1307,21 @@ const STAGES = [
   { key:'deal', label:'Deals', color:'var(--a-orange)' },
   { key:'renewal', label:'Renewals', color:'var(--success)' },
 ];
+let leadFormOpen = false;
 function viewSalesFunnel(){
   const cards = state.cache.salesPipeline || [];
   return `
-  <p class="muted" style="margin-bottom:16px;">Drag a card across stages as a lead turns into a deal, then a renewal.</p>
+  <div class="row-between">
+    <p class="muted" style="margin:0;">Drag a card across stages as a lead turns into a deal, then a renewal.</p>
+    <button class="btn-primary" onclick="leadFormOpen=!leadFormOpen; render();">${ICONS.plus} ${leadFormOpen?'Cancel':'Add lead'}</button>
+  </div>
+  ${leadFormOpen ? `
+  <form class="card grid grid-3" style="margin-bottom:16px;align-items:end;" onsubmit="handleAddLead(event)">
+    <div><label class="label">Name</label><input class="input" id="lf-name" placeholder="e.g. Priya — walk-in enquiry" required /></div>
+    <div><label class="label">Expected value (₹)</label><input class="input" id="lf-value" type="number" required /></div>
+    <div><label class="label">Follow-up / due date</label><input class="input" id="lf-due" type="date" value="${todayISO()}" /></div>
+    <div style="grid-column:1/-1;"><button class="btn-primary" type="submit">Add to Leads</button></div>
+  </form>` : ''}
   <div class="kanban">
     ${STAGES.map(stage=>{
       const stageCards = cards.filter(c=>c.stage===stage.key);
@@ -1271,6 +1340,18 @@ function viewSalesFunnel(){
       </div>`;
     }).join('')}
   </div>`;
+}
+async function handleAddLead(e){
+  e.preventDefault();
+  await addDocument('salesPipeline', {
+    name: document.getElementById('lf-name').value,
+    value: Number(document.getElementById('lf-value').value) || 0,
+    dueDate: document.getElementById('lf-due').value,
+    stage: 'lead',
+  });
+  leadFormOpen = false;
+  showToast('Lead added.');
+  await loadRoute();
 }
 async function handleDrop(stageKey){
   if(!state.dragCardId) return;
@@ -1293,7 +1374,7 @@ function viewAdminInvoices(){
   return `
   <div class="row-between">
     <p class="muted">${invoices.length} invoices</p>
-    <button class="btn-secondary" onclick='exportToExcel(${JSON.stringify(invoices.map(i=>({"Invoice No":i.number,Date:formatDMY(i.date),Member:i.memberName,Plan:i.planName,"Personal Training":i.ptPlanName||"—","GST Applied":i.gstEnabled?"Yes":"No",Amount:i.amount,GST:i.gstAmount||0,Total:i.total,"Payment Mode":i.paymentMode,"Raised By":i.raisedBy})))}, "invoices-report")'>${ICONS.download} Export Excel</button>
+    <button class="btn-secondary" onclick='exportToExcel(${JSON.stringify(invoices.map(i=>({"Invoice No":i.number,Date:formatDMY(i.date),"GSTIN":state.cache.gymSettings?.gstin||"",Member:i.memberName,Plan:i.planName,"Personal Training":i.ptPlanName||"—","HSN/SAC":i.lineItems?.[0]?.hsn||"","Taxable Value":i.amount,"GST Rate (%)":i.gstEnabled?i.gstRate:0,"CGST":i.cgst||0,"SGST":i.sgst||0,"Total GST":i.gstAmount||0,"Invoice Total":i.total,"Payment Mode":i.paymentMode,"Raised By":i.raisedBy})))}, "invoices-report-gstr1")'>${ICONS.download} Export Excel (GSTR-1 ready)</button>
   </div>
   <div class="card">${dataTableHTML('invoices', columns, invoices, ['number','memberName','planName','raisedBy'])}</div>`;
 }
@@ -1419,21 +1500,33 @@ async function handleAddUser(e){
   errEl.textContent = '';
   try{
     if(firebaseReady){
-      // Create the account on a secondary, throwaway Firebase app instance so
-      // the admin creating this user doesn't get signed out of their own
-      // session (createUserWithEmailAndPassword signs in as the new user on
-      // whichever auth instance you call it on).
-      const secondaryApp = firebase.initializeApp(FIREBASE_CONFIG, 'secondary-' + Date.now());
-      const cred = await secondaryApp.auth().createUserWithEmailAndPassword(email, password);
-      await setDocumentWithId('users', cred.user.uid, { name, email, role, createdAt: new Date().toISOString() });
-      await secondaryApp.auth().signOut();
-      await secondaryApp.delete();
+      try{
+        // Create the account on a secondary, throwaway Firebase app instance so
+        // the admin creating this user doesn't get signed out of their own
+        // session (createUserWithEmailAndPassword signs in as the new user on
+        // whichever auth instance you call it on).
+        const secondaryApp = firebase.initializeApp(FIREBASE_CONFIG, 'secondary-' + Date.now());
+        const cred = await secondaryApp.auth().createUserWithEmailAndPassword(email, password);
+        await setDocumentWithId('users', cred.user.uid, { name, email, role, createdAt: new Date().toISOString() });
+        await secondaryApp.auth().signOut();
+        await secondaryApp.delete();
+        showToast('User created.');
+      }catch(cloudErr){
+        // Most common cause: Email/Password sign-in isn't turned on yet in
+        // Firebase Authentication (auth/configuration-not-found). Rather
+        // than block on that, create a working local-only account instead
+        // — it logs in immediately in this browser; once Email/Password is
+        // enabled in the console, recreate it to get a real synced account.
+        console.warn('Cloud user creation failed — creating a local-only account instead.', cloudErr);
+        LocalStore.add('users', { name, email, password, role, createdAt: new Date().toISOString() });
+        showToast("Created as a local-only account — enable Email/Password sign-in in Firebase to sync it to the cloud.");
+      }
     } else {
       // Local-only mode: no real Firebase Auth account to create, so the
       // password is stored alongside the record for the local login check.
       LocalStore.add('users', { name, email, password, role, createdAt: new Date().toISOString() });
+      showToast('User created.');
     }
-    showToast('User created.');
     await loadRoute();
   }catch(err){
     errEl.textContent = err.message || 'Could not create user.';
@@ -1502,7 +1595,63 @@ function viewGymSettings(){
         <button class="btn-primary" style="width:fit-content;" type="submit">Save settings</button>
       </div>
     </div>
-  </form>`;
+  </form>
+
+  <div class="card" style="max-width:960px;margin-top:24px;">
+    <h2 class="section-title" style="margin-bottom:6px;">Backup &amp; restore</h2>
+    <p class="muted" style="margin:0 0 16px;">
+      Download everything (members, plans, invoices, users, sales pipeline, settings) as one file —
+      useful before switching this browser/device, or to move data created in local mode into the cloud
+      once it's connected.
+    </p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button type="button" class="btn-secondary" onclick="handleExportBackup()">${ICONS.download} Download backup (JSON)</button>
+      <label class="btn-secondary file-btn">${ICONS.download} Restore from backup
+        <input type="file" accept="application/json" onchange="handleImportBackup(event)" />
+      </label>
+    </div>
+  </div>`;
+}
+const BACKUP_COLLECTIONS = ['members','plans','ptPlans','invoices','users','salesPipeline'];
+function handleExportBackup(){
+  const backup = { exportedAt: new Date().toISOString() };
+  BACKUP_COLLECTIONS.forEach(c => { backup[c] = LocalStore.getAll(c); });
+  backup.gymSettings = LocalStore.getSingleton('gymSettings_main') || {};
+  backup.counters_invoices = LocalStore.getSingleton('counters_invoices') || { value: 0 };
+
+  const blob = new Blob([JSON.stringify(backup, null, 2)], { type:'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `blue-space-backup-${todayISO()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+async function handleImportBackup(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  try{
+    const text = await file.text();
+    const backup = JSON.parse(text);
+
+    for(const coll of BACKUP_COLLECTIONS){
+      const rows = Array.isArray(backup[coll]) ? backup[coll] : [];
+      for(const row of rows){
+        const { id, ...data } = row;
+        if(id) await setDocumentWithId(coll, id, data);
+        else await addDocument(coll, data);
+      }
+    }
+    if(backup.gymSettings) await setSingletonDoc('gymSettings', 'main', backup.gymSettings);
+    if(backup.counters_invoices) LocalStore.setSingleton('counters_invoices', backup.counters_invoices);
+
+    showToast('Backup restored.');
+    await loadRoute();
+  }catch(err){
+    console.warn('Could not restore backup.', err);
+    showToast('Could not read that backup file.');
+  }
+  e.target.value = '';
 }
 function handleToggleGst(){
   state.cache.gymSettings = state.cache.gymSettings || {};
@@ -1691,7 +1840,7 @@ function invoicePreviewHTML(){
           <div>
             <p class="font-display" style="font-weight:700;font-size:16px;margin:0;">${g.name||''}</p>
             <small>${g.address||''}</small><br/>
-            ${gstEnabled?`<small>GSTIN: ${g.gstin}</small><br/>`:''}
+            ${gstEnabled && g.gstin?`<small>GSTIN: ${g.gstin}</small><br/>`:''}
             <small>${g.phone||''}</small>
           </div>
         </div>
@@ -1719,7 +1868,8 @@ function invoicePreviewHTML(){
       </table>
       <div class="totals"><div class="totals-box">
         <div class="totals-row"><span>Subtotal</span><span>${fmtINR(inv.subtotal)}</span></div>
-        ${gstEnabled?`<div class="totals-row"><span>GST (${inv.gstRate}%)</span><span>${fmtINR(inv.gstAmount)}</span></div>`:''}
+        ${gstEnabled?`<div class="totals-row"><span>CGST (${(inv.gstRate/2).toFixed(1)}%)</span><span>${fmtINR(inv.cgst ?? inv.gstAmount/2)}</span></div>
+        <div class="totals-row"><span>SGST (${(inv.gstRate/2).toFixed(1)}%)</span><span>${fmtINR(inv.sgst ?? inv.gstAmount/2)}</span></div>`:''}
         <div class="totals-row total"><span>Total</span><span>${fmtINR(inv.total)}</span></div>
       </div></div>
       <div style="display:flex;justify-content:space-between;font-size:12px;color:#575F79;margin-bottom:16px;">
@@ -1795,12 +1945,22 @@ async function handleGenerateInvoice(e){
     }
 
     const number = await nextInvoiceNumber();
-    const gstEnabled = !!g.gstEnabled && !!g.gstin;
+    // The toggle alone controls whether tax is charged — GSTIN is only for
+    // what's printed on the invoice. Requiring both was the bug: turning
+    // GST on with GSTIN not yet filled in silently produced a zero-tax
+    // invoice with no indication why.
+    const gstEnabled = !!g.gstEnabled;
     const gstRate = 18;
     const lineItems = [{ name: plan.name, hsn: plan.hsn, amount: plan.price||0 }];
     if(includePt && ptPlan) lineItems.push({ name: `Personal Training — ${ptPlan.name}`, hsn: ptPlan.hsn, amount: ptPlan.price||0 });
     const subtotal = lineItems.reduce((s,i)=>s+i.amount,0);
     const gstAmount = gstEnabled ? +(subtotal*(gstRate/100)).toFixed(2) : 0;
+    // Split for GSTR-1: assumes intra-state supply (CGST+SGST), the normal
+    // case for a single-location gym. If you ever bill an out-of-state
+    // member, that invoice's split isn't correct for IGST — handle those
+    // separately in your filing.
+    const cgst = +(gstAmount/2).toFixed(2);
+    const sgst = +(gstAmount - cgst).toFixed(2);
     const total = subtotal + gstAmount;
 
     const invoiceDoc = {
@@ -1809,7 +1969,7 @@ async function handleGenerateInvoice(e){
       ptPlanId: includePt && ptPlan ? ptPlan.id : null,
       ptPlanName: includePt && ptPlan ? ptPlan.name : null,
       startDate: start, expiryDate: expiryStr,
-      lineItems, amount: subtotal, gstEnabled, gstRate, gstAmount, total,
+      lineItems, amount: subtotal, gstEnabled, gstRate, gstAmount, cgst, sgst, total,
       paymentMode, raisedBy: state.profile.name,
     };
     const savedInvoice = await addDocument('invoices', invoiceDoc);
