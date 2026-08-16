@@ -1,0 +1,1912 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Blue Space — Gym Management</title>
+
+<!--
+============================================================================
+BLUE SPACE — single-file build for GitHub Pages + Firebase (free Spark plan)
+============================================================================
+
+SETUP (one-time):
+
+1. Create a Firebase project at https://console.firebase.google.com (free
+   Spark plan is enough — this app deliberately never uses Firebase
+   Storage, which now requires the paid Blaze plan; the gym logo is
+   instead resized small and stored as a data URL directly in Firestore).
+2. Authentication > Sign-in method > enable Email/Password.
+3. Firestore Database > Create database > start in production mode.
+4. Project settings (gear icon) > General > scroll to "Your apps" > Add app
+   > Web. Copy the firebaseConfig object it gives you and paste it into
+   FIREBASE_CONFIG below, replacing the placeholder values.
+
+   This config is NOT a secret — it's meant to be public in client-side
+   code. Firebase security comes from the Firestore RULES below, not from
+   hiding this object. Paste it in as-is.
+
+5. Firestore Database > Rules tab — replace the default rules with the
+   block below (also included as FIRESTORE_RULES reference at the bottom
+   of this comment) and click Publish.
+
+6. Push this single index.html to a GitHub repo, then Settings > Pages >
+   deploy from the branch root. That's the whole hosting step — no build,
+   no npm, nothing else to upload.
+
+7. Open the deployed page. Since no Super Admin exists yet, you'll land on
+   a one-time "Create Super Admin" screen instead of the login screen —
+   fill it in once and you're in. (This replaces needing a separate Node
+   seed script — everything happens in the browser.)
+
+DATA MODEL — kept relational/normalized (like SQL tables) rather than
+nesting everything into a few giant documents, specifically to stay
+efficient on Firestore's free-tier storage and read/write quotas:
+
+  users        { name, email, role, createdAt }
+  members      { name, email, phone, planId, planName, trainerId,
+                 startDate, expiryDate, status, freezeUntil }
+  plans        { name, price, hsn, durationMonths }
+  ptPlans      { name, price, hsn, sessions }          (personal training)
+  invoices     { number, date, memberId, memberName, planId, planName,
+                 ptPlanId, ptPlanName, lineItems[], amount, gstEnabled,
+                 gstRate, gstAmount, total, paymentMode, raisedBy }
+  salesPipeline{ name, value, dueDate, stage }
+  gymSettings/main  (single doc)  { name, address, gstin, gstEnabled, ... }
+  counters/invoices (single doc)  { value }   -- atomic invoice numbering
+
+Each collection is small and flat, referenced by id (like a foreign key)
+rather than duplicated/nested — this is what keeps per-document size and
+total storage down on the free plan.
+
+FIRESTORE_RULES (paste into Firestore > Rules):
+
+  rules_version = '2';
+  service cloud.firestore {
+    match /databases/{database}/documents {
+      function isSignedIn() { return request.auth != null; }
+      function myRole() {
+        return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+      }
+      function isSuperAdmin() { return isSignedIn() && myRole() == "super_admin"; }
+      function isStaff() { return isSignedIn() && myRole() == "staff"; }
+      function isTrainer() { return isSignedIn() && myRole() == "trainer"; }
+
+      match /users/{userId} {
+        allow read: if isSignedIn() && (request.auth.uid == userId || isSuperAdmin());
+        allow create: if !exists(/databases/$(database)/documents/users/$(request.auth.uid))
+                       || isSuperAdmin();
+        allow update, delete: if isSuperAdmin();
+      }
+      match /members/{id} {
+        allow read: if isSuperAdmin() || isStaff() ||
+          (isTrainer() && resource.data.trainerId == request.auth.uid);
+        allow create, update: if isSuperAdmin() || isStaff();
+        allow delete: if isSuperAdmin();
+      }
+      match /plans/{id} { allow read: if isSignedIn(); allow write: if isSuperAdmin(); }
+      match /ptPlans/{id} { allow read: if isSignedIn(); allow write: if isSuperAdmin(); }
+      match /invoices/{id} {
+        allow read: if isSignedIn();
+        allow create: if isSuperAdmin() || isStaff();
+        allow update, delete: if isSuperAdmin();
+      }
+      match /counters/{id} { allow read, write: if isSuperAdmin() || isStaff(); }
+      match /salesPipeline/{id} { allow read, write: if isSuperAdmin() || isStaff(); }
+      match /gymSettings/{id} { allow read: if isSignedIn(); allow write: if isSuperAdmin(); }
+    }
+  }
+
+Firebase Storage is intentionally not used anywhere in this app (see note
+above) — there are no Storage rules to configure.
+============================================================================
+-->
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+
+:root{
+  --p-50:#EEF2FF; --p-100:#E0E7FF; --p-200:#C7D5FE; --p-300:#A4B7FC;
+  --p-400:#7C93FA; --p-500:#4F6EF7; --p-600:#3D57E8; --p-700:#3244C4;
+  --p-800:#28368F; --p-900:#1C2563;
+  --a-blue:#3B82F6;   --a-blue-bg:#EAF1FF;
+  --a-purple:#8B5CF6; --a-purple-bg:#F3EEFF;
+  --a-orange:#FB923C; --a-orange-bg:#FFF1E4;
+  --a-pink:#F472B6;   --a-pink-bg:#FDEAF3;
+  --success:#20B26C;  --success-bg:#E7F8EF;
+  --warn:#F0A631;     --warn-bg:#FDF1E0;
+  --danger:#EF5A5A;   --danger-bg:#FCEAEA;
+  --ink-900:#12172E; --ink-600:#575F79; --ink-400:#8A90A6;
+  --surface:#FFFFFF; --surface-soft:#F4F6FB; --surface-border:#E7EAF3;
+}
+body.dark{
+  --ink-900:#F1F5F9; --ink-600:#B4BCCC; --ink-400:#8892A6;
+  --surface:#151A2E; --surface-soft:#0E1224; --surface-border:#262C46;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;height:100%;}
+body{
+  font-family:'Inter',sans-serif; background:var(--surface-soft); color:var(--ink-900);
+  -webkit-font-smoothing:antialiased; transition:background .15s,color .15s;
+}
+h1,h2,h3,h4,.font-display{font-family:'Plus Jakarta Sans',sans-serif;}
+a{color:inherit;}
+button{font-family:inherit; cursor:pointer;}
+input,select,textarea{font-family:inherit;}
+
+.card{
+  background:var(--surface); border-radius:20px; border:1px solid var(--surface-border);
+  box-shadow:0 1px 2px rgba(18,23,46,.04), 0 8px 24px -10px rgba(18,23,46,.10);
+  padding:20px;
+}
+.btn-primary{
+  display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  border-radius:12px; background:var(--p-500); color:#fff; font-weight:500;
+  padding:10px 16px; font-size:14px; border:none; transition:background .15s;
+}
+.btn-primary:hover{background:var(--p-600);}
+.btn-primary:disabled{opacity:.5; cursor:not-allowed;}
+.btn-secondary{
+  display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  border-radius:12px; background:var(--surface); border:1px solid var(--surface-border); color:var(--ink-900);
+  font-weight:500; padding:10px 16px; font-size:14px; transition:background .15s;
+}
+.btn-secondary:hover{background:var(--surface-soft);}
+.input{
+  width:100%; border-radius:12px; border:1px solid var(--surface-border); background:var(--surface);
+  padding:10px 14px; font-size:14px; color:var(--ink-900); outline:none;
+}
+.input:focus{border-color:var(--p-500); box-shadow:0 0 0 3px rgba(79,110,247,.15);}
+.label{display:block; font-size:12px; font-weight:500; color:var(--ink-600); margin-bottom:6px;}
+.badge{display:inline-flex; align-items:center; border-radius:999px; padding:4px 10px; font-size:12px; font-weight:500; text-transform:capitalize;}
+.badge-active{background:var(--success-bg); color:var(--success);}
+.badge-frozen{background:var(--warn-bg); color:var(--warn);}
+.badge-expired{background:var(--danger-bg); color:var(--danger);}
+
+table{width:100%; border-collapse:collapse; font-size:14px;}
+thead tr{text-align:left; font-size:12px; color:var(--ink-400); border-bottom:1px solid var(--surface-border);}
+th{padding:8px 6px; font-weight:500; cursor:default;}
+th.sortable{cursor:pointer; user-select:none;}
+tbody tr{border-bottom:1px solid var(--surface-border);}
+tbody tr:last-child{border-bottom:none;}
+td{padding:10px 6px;}
+
+#app{min-height:100vh;}
+.shell{display:flex; min-height:100vh;}
+.sidebar{
+  width:250px; flex-shrink:0; background:var(--surface); color:var(--ink-900);
+  border-right:1px solid var(--surface-border);
+  display:flex; flex-direction:column; position:sticky; top:0; height:100vh;
+}
+.sidebar.dark-side{background:var(--p-900); color:#fff; border-right:1px solid var(--p-800);}
+.sidebar-logo{display:flex; align-items:center; gap:10px; padding:0 22px; height:64px;}
+.sidebar-logo .mark{width:32px; height:32px; border-radius:9px; background:linear-gradient(135deg,var(--p-500),var(--a-purple)); display:flex; align-items:center; justify-content:center; font-weight:800; font-family:'Plus Jakarta Sans',sans-serif; color:#fff;}
+.sidebar-nav{flex:1; padding:12px; display:flex; flex-direction:column; gap:4px; overflow-y:auto;}
+.nav-item{
+  display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px;
+  font-size:14px; font-weight:500; color:var(--ink-600); text-decoration:none; background:none; border:none; text-align:left; width:100%;
+}
+.sidebar.dark-side .nav-item{color:rgba(255,255,255,.75);}
+.nav-item:hover{background:var(--p-50); color:var(--p-700);}
+.sidebar.dark-side .nav-item:hover{background:rgba(255,255,255,.08); color:#fff;}
+.nav-item.active{background:var(--p-500); color:#fff;}
+.sidebar-footer{padding:16px; border-top:1px solid var(--surface-border);}
+.sidebar.dark-side .sidebar-footer{border-top:1px solid var(--p-800);}
+.sidebar-footer .name{font-size:14px; font-weight:500; margin:0 0 2px;}
+.sidebar-footer .role{font-size:12px; color:var(--ink-400); margin:0 0 12px; text-transform:capitalize;}
+.sidebar.dark-side .sidebar-footer .role{color:rgba(255,255,255,.6);}
+
+.topbar{
+  height:64px; display:flex; align-items:center; justify-content:space-between;
+  padding:0 24px; border-bottom:1px solid var(--surface-border); background:var(--surface); position:sticky; top:0; z-index:5;
+}
+.topbar h1{font-size:18px; margin:0;}
+.main{flex:1; min-width:0;}
+.content{padding:24px; max-width:1440px; margin:0 auto;}
+.icon-btn{background:none;border:none;padding:8px;border-radius:10px;color:var(--ink-600);display:inline-flex;}
+.icon-btn:hover{background:var(--surface-soft);}
+
+.hamburger{display:none; background:none; border:none; padding:6px; margin-right:8px; color:var(--ink-900);}
+.hamburger svg{width:20px; height:20px;}
+
+@media (max-width:900px){
+  .sidebar{display:none;}
+  .hamburger{display:inline-flex;}
+  .sidebar.mobile-open{
+    display:flex; position:fixed; inset:0 auto 0 0; z-index:50; box-shadow:0 0 0 9999px rgba(0,0,0,.4);
+  }
+}
+
+.grid{display:grid; gap:16px;}
+.grid-2{grid-template-columns:repeat(2,1fr);}
+.grid-3{grid-template-columns:repeat(3,1fr);}
+.grid-4{grid-template-columns:repeat(4,1fr);}
+@media (max-width:900px){ .grid-2,.grid-3,.grid-4{grid-template-columns:1fr 1fr;} }
+@media (max-width:600px){ .grid-2,.grid-3,.grid-4{grid-template-columns:1fr;} }
+
+.stat-card{display:flex; align-items:flex-start; justify-content:space-between;}
+.stat-card .lbl{font-size:12px; color:var(--ink-400); margin:0 0 6px;}
+.stat-card .val{font-size:24px; font-weight:700; font-family:'Plus Jakarta Sans',sans-serif; margin:0;}
+.stat-icon{width:40px; height:40px; border-radius:12px; display:flex; align-items:center; justify-content:center; flex-shrink:0;}
+
+.hero{
+  border-radius:22px; padding:26px 28px; color:#fff; margin-bottom:20px;
+  background:linear-gradient(135deg,var(--p-700) 0%, var(--p-500) 55%, var(--a-purple) 100%);
+  display:flex; align-items:center; justify-content:space-between; gap:20px; flex-wrap:wrap;
+}
+.hero h2{font-size:20px; margin:0 0 6px;}
+.hero p{margin:0; color:rgba(255,255,255,.8); font-size:13px; max-width:420px;}
+.hero-stats{display:flex; gap:22px; flex-wrap:wrap;}
+.hero-stats .hs{background:rgba(255,255,255,.14); border-radius:14px; padding:10px 16px; min-width:110px;}
+.hero-stats .hs .hv{font-size:18px; font-weight:700; font-family:'Plus Jakarta Sans',sans-serif;}
+.hero-stats .hs .hl{font-size:11px; color:rgba(255,255,255,.75); margin-top:2px;}
+
+.toggle{width:48px; height:28px; border-radius:999px; background:var(--surface-border); position:relative; border:none; flex-shrink:0; transition:background .15s;}
+.toggle.on{background:var(--p-500);}
+.toggle .knob{position:absolute; top:4px; left:4px; width:20px; height:20px; border-radius:50%; background:#fff; transition:transform .15s;}
+.toggle.on .knob{transform:translateX(20px);}
+
+.login-shell{min-height:100vh; display:grid; grid-template-columns:1fr 1fr;}
+@media (max-width:850px){ .login-shell{grid-template-columns:1fr;} }
+.login-brand{background:linear-gradient(160deg,var(--p-800),var(--p-500) 70%,var(--a-purple)); color:#fff; padding:48px; display:flex; flex-direction:column; justify-content:space-between;}
+@media (max-width:850px){ .login-brand{display:none;} }
+.login-form-wrap{display:flex; align-items:center; justify-content:center; padding:24px;}
+.login-form{width:100%; max-width:380px;}
+.demo-creds{margin-top:20px; padding:14px; border-radius:12px; background:var(--p-50); border:1px solid var(--p-100); font-size:12px; color:var(--ink-600); line-height:1.6;}
+.demo-creds b{color:var(--ink-900);}
+
+.kanban{display:grid; grid-template-columns:repeat(3,1fr); gap:16px;}
+@media (max-width:800px){ .kanban{grid-template-columns:1fr;} }
+.kanban-col{background:var(--surface-soft); border-radius:16px; border:1px solid var(--surface-border); padding:10px; min-height:120px;}
+.kanban-col-head{display:flex; align-items:center; gap:8px; padding:6px 8px; margin-bottom:8px;}
+.dot{width:8px; height:8px; border-radius:50%;}
+.kanban-card{background:var(--surface); border:1px solid var(--surface-border); border-radius:12px; padding:12px; margin-bottom:8px; cursor:grab; box-shadow:0 1px 2px rgba(18,23,46,.05);}
+.kanban-card .kname{font-size:14px; font-weight:500; margin:0 0 4px;}
+.kanban-card .kmeta{font-size:12px; color:var(--ink-400); margin:0;}
+.kanban-empty{font-size:12px; color:var(--ink-400); padding:12px 8px;}
+
+.invoice{background:#fff; color:#12172E; padding:32px; max-width:640px; margin:0 auto;}
+.invoice-head{display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #E7EAF3; padding-bottom:20px; margin-bottom:20px;}
+.invoice-logo{width:48px; height:48px; border-radius:10px; object-fit:contain;}
+.invoice small{color:#8A90A6; font-size:12px;}
+.invoice table{margin-bottom:16px;}
+.invoice .totals{display:flex; justify-content:flex-end; margin-bottom:20px;}
+.invoice .totals-box{width:220px; font-size:14px;}
+.invoice .totals-row{display:flex; justify-content:space-between; padding:3px 0; color:#575F79;}
+.invoice .totals-row.total{font-weight:700; font-family:'Plus Jakarta Sans',sans-serif; font-size:16px; color:#12172E; border-top:1px solid #E7EAF3; padding-top:8px; margin-top:4px;}
+
+.empty-state{text-align:center; padding:32px; color:var(--ink-400); font-size:14px;}
+.toast{
+  position:fixed; bottom:20px; right:20px; background:var(--ink-900); color:var(--surface); padding:12px 18px;
+  border-radius:12px; font-size:14px; z-index:100; box-shadow:0 8px 24px rgba(0,0,0,.2);
+}
+.logo-preview{width:64px; height:64px; border-radius:12px; background:var(--surface-soft); border:1px solid var(--surface-border); display:flex; align-items:center; justify-content:center; overflow:hidden; flex-shrink:0;}
+.logo-preview img{width:100%; height:100%; object-fit:contain;}
+.file-btn{position:relative; overflow:hidden;}
+.file-btn input[type=file]{position:absolute; inset:0; opacity:0; cursor:pointer;}
+.row-between{display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; flex-wrap:wrap; gap:8px;}
+.section-title{font-size:16px; font-weight:600; font-family:'Plus Jakarta Sans',sans-serif; margin:0; display:flex; align-items:center; gap:8px;}
+.muted{color:var(--ink-400); font-size:13px;}
+.chart-card canvas{max-height:200px;}
+.pill-tabs{display:inline-flex; background:var(--surface-soft); border-radius:12px; padding:4px; gap:4px;}
+.pill-tab{border:none; background:none; padding:7px 14px; border-radius:9px; font-size:13px; font-weight:500; color:var(--ink-600);}
+.pill-tab.active{background:var(--surface); color:var(--p-700); box-shadow:0 1px 2px rgba(18,23,46,.08);}
+.bucket-row{display:flex; align-items:center; gap:12px; padding:10px 4px; border-bottom:1px solid var(--surface-border);}
+.bucket-row:last-child{border-bottom:none;}
+.bucket-count{width:34px; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:13px; flex-shrink:0;}
+.search-wrap{position:relative; max-width:280px; margin-bottom:14px;}
+.search-wrap svg{position:absolute; left:11px; top:50%; transform:translateY(-50%); color:var(--ink-400);}
+.search-wrap input{padding-left:34px;}
+.spinner-wrap{min-height:60vh; display:flex; align-items:center; justify-content:center; color:var(--ink-400); font-size:14px;}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<!-- Firebase (compat SDK — works with plain <script> tags, no build step) -->
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+
+<!-- Excel export, PDF export, charts -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<script>
+/* ============================================================
+   FIREBASE CONFIG — replace with your own project's values
+   (Firebase console > Project settings > Your apps > Web app)
+   ============================================================ */
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCG0-eF-dhsT1RpArNpZB6lyStg9Fbcdi0",
+  authDomain: "blue-space-bfb76.firebaseapp.com",
+  projectId: "blue-space-bfb76",
+  storageBucket: "blue-space-bfb76.firebasestorage.app",
+  messagingSenderId: "563819147236",
+  appId: "1:563819147236:web:ac2dcf6c20eff6ad0be1f1",
+};
+
+/* ============================================================
+   LOCAL-FIRST DATA LAYER
+   Every read/write goes to localStorage FIRST (instant, always
+   works, no network needed) and is then mirrored to Firebase in
+   the background if a real project is configured and reachable.
+   This is what fixes "stuck on Loading..." when opening the file
+   before Firebase is set up — the app never waits on the network
+   to render.
+   ============================================================ */
+const FIREBASE_ENABLED = FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "YOUR_API_KEY";
+let firebaseReady = false;   // set true only after a successful reachability probe
+let auth, db;
+
+if (FIREBASE_ENABLED) {
+  try {
+    firebase.initializeApp(FIREBASE_CONFIG);
+    auth = firebase.auth();
+    db = firebase.firestore();
+  } catch (e) {
+    console.warn("Firebase initialization failed — running in local-only mode.", e);
+  }
+}
+
+// Races a promise against a timeout so a hung/misconfigured Firebase call
+// can never leave the app stuck on a loading screen.
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms || 6000)),
+  ]);
+}
+
+async function probeFirebase() {
+  if (!auth || !db) return false;
+  try {
+    await withTimeout(db.collection("users").limit(1).get(), 5000);
+    return true;
+  } catch (e) {
+    console.warn("Firebase not reachable — running in local-only mode.", e.message);
+    return false;
+  }
+}
+
+/* ---- localStorage-backed mini "database" ---- */
+const LS_PREFIX = "bs_";
+const LocalStore = {
+  getAll(coll){ try{ return JSON.parse(localStorage.getItem(LS_PREFIX+coll) || "[]"); }catch{ return []; } },
+  setAll(coll, arr){ try{ localStorage.setItem(LS_PREFIX+coll, JSON.stringify(arr)); return true; }catch(e){ console.warn("localStorage write failed", e); return false; } },
+  add(coll, doc){
+    const all = this.getAll(coll);
+    const id = doc.id || ("local_" + Date.now() + "_" + Math.random().toString(36).slice(2,8));
+    const rec = { ...doc, id };
+    all.push(rec);
+    this.setAll(coll, all);
+    return rec;
+  },
+  setDoc(coll, id, data){
+    const all = this.getAll(coll);
+    const idx = all.findIndex(x=>x.id===id);
+    const rec = { ...data, id };
+    if(idx>-1) all[idx]=rec; else all.push(rec);
+    this.setAll(coll, all);
+    return rec;
+  },
+  update(coll, id, patch){
+    const all = this.getAll(coll);
+    const idx = all.findIndex(x=>x.id===id);
+    if(idx>-1){ all[idx] = { ...all[idx], ...patch }; this.setAll(coll, all); }
+  },
+  remove(coll, id){ this.setAll(coll, this.getAll(coll).filter(x=>x.id!==id)); },
+  getSingleton(key){ try{ return JSON.parse(localStorage.getItem(LS_PREFIX+key) || "null"); }catch{ return null; } },
+  setSingleton(key, val){ try{ localStorage.setItem(LS_PREFIX+key, JSON.stringify(val)); return true; }catch(e){ console.warn("localStorage write failed", e); return false; } },
+};
+
+/* ---- Unified data access: local first, cloud in the background ---- */
+async function getCollection(name){
+  if(firebaseReady){
+    try{
+      const snap = await withTimeout(db.collection(name).get());
+      const rows = snap.docs.map(d=>({ id:d.id, ...d.data() }));
+      LocalStore.setAll(name, rows); // keep the local cache warm for next time / offline use
+      return rows;
+    }catch(e){
+      console.warn("Cloud read failed for "+name+" — using local cache.", e);
+    }
+  }
+  return LocalStore.getAll(name);
+}
+async function getMembersForTrainer(trainerId){
+  if(firebaseReady){
+    try{
+      const snap = await withTimeout(db.collection("members").where("trainerId","==",trainerId).get());
+      return snap.docs.map(d=>({ id:d.id, ...d.data() }));
+    }catch(e){
+      console.warn("Cloud query failed — filtering local cache instead.", e);
+    }
+  }
+  return LocalStore.getAll("members").filter(m=>m.trainerId===trainerId);
+}
+async function getSingletonDoc(coll, id){
+  if(firebaseReady){
+    try{
+      const doc = await withTimeout(db.collection(coll).doc(id).get());
+      const data = doc.exists ? doc.data() : null;
+      if(data) LocalStore.setSingleton(coll+"_"+id, data);
+      return data || LocalStore.getSingleton(coll+"_"+id) || {};
+    }catch(e){
+      console.warn("Cloud read failed for "+coll+"/"+id+" — using local cache.", e);
+    }
+  }
+  return LocalStore.getSingleton(coll+"_"+id) || {};
+}
+async function setSingletonDoc(coll, id, data){
+  const savedLocally = LocalStore.setSingleton(coll+"_"+id, data); // local first
+  if(!savedLocally){
+    showToast("Couldn't save locally — storage may be full (often caused by a large logo image).");
+  }
+  if(firebaseReady){
+    withTimeout(db.collection(coll).doc(id).set(data, { merge:true })).catch(e=>{
+      console.warn("Cloud sync failed for "+coll+"/"+id+" — kept locally only.", e);
+    });
+  }
+}
+async function addDocument(coll, data){
+  const rec = LocalStore.add(coll, data); // local first — usable immediately
+  if(firebaseReady){
+    withTimeout(db.collection(coll).add(data)).then(ref=>{
+      // Reconcile the locally-generated id with Firestore's real id.
+      LocalStore.remove(coll, rec.id);
+      LocalStore.setDoc(coll, ref.id, data);
+    }).catch(e=>{
+      console.warn("Cloud sync failed for "+coll+" — kept locally only.", e);
+      showToast("Saved locally — will sync to the cloud once it's reachable.");
+    });
+  }
+  return rec;
+}
+async function setDocumentWithId(coll, id, data){
+  const rec = LocalStore.setDoc(coll, id, data); // local first
+  if(firebaseReady){
+    withTimeout(db.collection(coll).doc(id).set(data, { merge:true })).catch(e=>{
+      console.warn("Cloud sync failed for "+coll+"/"+id+" — kept locally only.", e);
+    });
+  }
+  return rec;
+}
+async function updateDocument(coll, id, patch){
+  LocalStore.update(coll, id, patch); // local first
+  if(firebaseReady){
+    withTimeout(db.collection(coll).doc(id).update(patch)).catch(e=>{
+      console.warn("Cloud sync failed for "+coll+"/"+id+" — kept locally only.", e);
+    });
+  }
+}
+async function deleteDocument(coll, id){
+  LocalStore.remove(coll, id); // local first
+  if(firebaseReady){
+    withTimeout(db.collection(coll).doc(id).delete()).catch(e=>{
+      console.warn("Cloud sync failed for delete "+coll+"/"+id, e);
+    });
+  }
+}
+
+/* ---------------- Icons ---------------- */
+const ICONS = {
+  rupee: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h12M6 8h12M6 13l8.5 8M6 13h3c3 0 5-1.5 5-5"/></svg>',
+  receipt: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 2h16v20l-3-2-3 2-3-2-3 2-3-2-1 1zM9 7h6M9 11h6M9 15h4"/></svg>',
+  users: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  alert: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86l-8.4 14.55A1 1 0 0 0 2.75 20h18.5a1 1 0 0 0 .87-1.6l-8.4-14.55a1 1 0 0 0-1.72 0z"/></svg>',
+  download: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>',
+  plus: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>',
+  trash: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z"/></svg>',
+  dashboard: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>',
+  kanban: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18"/></svg>',
+  settings: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+  logout: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>',
+  menu: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>',
+  clipboard: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2"/></svg>',
+  usercog: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="7" r="4"/><path d="M2 21v-2a4 4 0 0 1 4-4h3a4 4 0 0 1 4 4v2"/><circle cx="19" cy="17" r="2.5"/></svg>',
+  dumbbell: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6.5 6.5l11 11M21 21l-1-1M3 4l1 1M18 3l3 3-3 3M6 15l-3 3 3 3M4.5 9.5l5-5M9.5 19.5l5-5"/></svg>',
+  calendar: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>',
+  search: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>',
+  sun: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+  moon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>',
+  bell: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/></svg>',
+  chevUp: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M18 15l-6-6-6 6"/></svg>',
+  chevDown: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg>',
+};
+
+/* ---------------- Global app state ---------------- */
+let state = {
+  authResolved: false,
+  currentUser: null,        // firebase auth user
+  profile: null,             // { id, name, email, role }
+  needsBootstrap: false,     // true if no super_admin exists yet
+  route: 'login',
+  mobileOpen: false,
+  toast: null,
+  cache: {},                 // per-collection arrays, loaded on demand
+  invoicePreview: null,
+  invoiceMode: 'existing',
+  plansTab: 'membership',
+  dragCardId: null,
+  memberFormOpen: false,
+  theme: {
+    mode: localStorage.getItem('bs_mode') || 'light',
+    sidebar: localStorage.getItem('bs_sidebar') || 'light',
+  },
+  tables: {}, // per-table {query,sortKey,sortDir,page} keyed by table id
+  charts: {},
+};
+
+/* ---------------- Small helpers ---------------- */
+const fmtINR = (n) => '₹' + (n||0).toLocaleString('en-IN');
+const todayISO = () => new Date().toISOString().slice(0,10);
+const daysBetween = (a,b) => Math.round((new Date(b) - new Date(a)) / 86400000);
+// Dates are stored as ISO (YYYY-MM-DD) throughout — that's what sorts and
+// does date math correctly. This only reformats them for DISPLAY.
+function formatDMY(iso){
+  if(!iso) return '';
+  const parts = String(iso).slice(0,10).split('-');
+  if(parts.length !== 3) return iso;
+  const [y,m,d] = parts;
+  return `${d}-${m}-${y}`;
+}
+function showToast(msg){ state.toast = msg; const el = document.getElementById('toast-slot'); if(el) el.innerHTML = `<div class="toast">${msg}</div>`; setTimeout(()=>{ if(el) el.innerHTML=''; }, 2500); }
+function statusBadgeHTML(status){
+  const cls = status==='frozen' ? 'badge-frozen' : status==='expired' ? 'badge-expired' : 'badge-active';
+  return `<span class="badge ${cls}">${status||'active'}</span>`;
+}
+function applyTheme(){
+  document.body.classList.toggle('dark', state.theme.mode === 'dark');
+}
+function toggleAppMode(){
+  state.theme.mode = state.theme.mode === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('bs_mode', state.theme.mode);
+  applyTheme();
+  render();
+}
+function toggleSidebarTheme(){
+  state.theme.sidebar = state.theme.sidebar === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('bs_sidebar', state.theme.sidebar);
+  render();
+}
+
+/* ---------------- Firestore data access ---------------- */
+async function loadAllFor(route){
+  // Loads exactly what each view needs, cached on state.cache for this render pass.
+  const c = state.cache;
+  if(route === 'admin/summary'){
+    [c.invoices, c.members, c.users] = await Promise.all([getCollection('invoices'), getCollection('members'), getCollection('users')]);
+  } else if(route === 'admin/members' || route === 'staff/members'){
+    [c.members, c.users, c.plans] = await Promise.all([getCollection('members'), getCollection('users'), getCollection('plans')]);
+  } else if(route === 'admin/sales' || route === 'staff/sales'){
+    c.salesPipeline = await getCollection('salesPipeline');
+  } else if(route === 'admin/invoices'){
+    c.invoices = await getCollection('invoices');
+  } else if(route === 'admin/plans'){
+    [c.plans, c.ptPlans] = await Promise.all([getCollection('plans'), getCollection('ptPlans')]);
+  } else if(route === 'admin/users'){
+    c.users = await getCollection('users');
+  } else if(route === 'admin/settings'){
+    c.gymSettings = await getSingletonDoc('gymSettings', 'main');
+  } else if(route === 'staff/dashboard'){
+    [c.members, c.invoices] = await Promise.all([getCollection('members'), getCollection('invoices')]);
+  } else if(route === 'staff/invoices'){
+    [c.members, c.plans, c.ptPlans, c.users, c.gymSettings] = await Promise.all([
+      getCollection('members'), getCollection('plans'), getCollection('ptPlans'), getCollection('users'),
+      getSingletonDoc('gymSettings', 'main'),
+    ]);
+  } else if(route === 'trainer/dashboard' || route === 'trainer/members'){
+    c.myMembers = await getMembersForTrainer(state.profile.id);
+  }
+}
+
+/* Auto-expire/auto-freeze — runs against the local cache first (instant),
+   then pushes any changed member docs to the cloud in the background. */
+async function runAutoExpireCheck(){
+  const today = todayISO();
+  const members = LocalStore.getAll('members');
+  const changed = [];
+  members.forEach(m => {
+    if(m.status==='active' && m.expiryDate && m.expiryDate < today){ m.status='expired'; changed.push(m); }
+    if(m.status==='frozen' && m.freezeUntil && m.freezeUntil < today){ m.status='active'; changed.push(m); }
+  });
+  if(changed.length){
+    LocalStore.setAll('members', members);
+    if(firebaseReady){
+      changed.forEach(m => {
+        withTimeout(db.collection('members').doc(m.id).set({ status:m.status }, { merge:true })).catch(()=>{});
+      });
+    }
+  }
+}
+
+/* Invoice numbering: local counter first (instant, works offline), best-
+   effort synced to a Firestore transaction so numbers stay unique once
+   multiple devices are online at the same time. */
+async function nextInvoiceNumber(){
+  const key = 'counters_invoices';
+  const current = LocalStore.getSingleton(key) || { value: 0 };
+  const updated = { value: current.value + 1 };
+  LocalStore.setSingleton(key, updated);
+  const year = new Date().getFullYear();
+  const number = `INV-${year}-${String(updated.value).padStart(6,'0')}`;
+
+  if(firebaseReady){
+    withTimeout(db.runTransaction(async (tx) => {
+      const ref = db.collection('counters').doc('invoices');
+      const snap = await tx.get(ref);
+      const cloudCurrent = snap.exists ? (snap.data().value || 0) : 0;
+      tx.set(ref, { value: Math.max(cloudCurrent, updated.value) }, { merge:true });
+    })).catch(e => console.warn('Invoice counter cloud sync failed — kept locally only.', e));
+  }
+  return number;
+}
+
+function exportToExcel(rows, filename){
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+  XLSX.writeFile(wb, filename + '.xlsx');
+}
+
+/* ---------------- Auth ----------------
+   Two parallel paths behind one interface (state.currentUser / state.profile):
+   - "cloud" path: real Firebase Auth, used once firebaseReady is true.
+   - "local" path: a lightweight fallback so the app is fully usable the
+     moment you open the file, before Firebase is configured. Local-mode
+     accounts live only in this browser's localStorage (password included —
+     fine for local testing, not a substitute for real auth once you go
+     live on Firebase).
+*/
+function routeForRole(role){
+  return role==='super_admin' ? 'admin/summary' : role==='staff' ? 'staff/dashboard' : 'trainer/dashboard';
+}
+// Local mode always has one guaranteed login, so you're never locked out
+// even if this browser's localStorage gets reset (e.g. opening a freshly
+// re-downloaded copy of this file with a different filename/URL, which
+// browsers treat as separate storage). Change these if you want, but keep
+// a default — it's what the "Create Super Admin" bootstrap screen used to
+// require manually every time.
+const DEFAULT_ADMIN = { name: 'Adithya', email: 'adithya@business.com', password: 'business@2026', role: 'super_admin' };
+function ensureDefaultAdmin(){
+  const users = LocalStore.getAll('users');
+  if(!users.some(u=>u.role==='super_admin')){
+    LocalStore.setDoc('users', 'default-super-admin', { ...DEFAULT_ADMIN, createdAt: new Date().toISOString() });
+  }
+}
+function fillDefaultAdmin(){
+  document.getElementById('login-email').value = DEFAULT_ADMIN.email;
+  document.getElementById('login-password').value = DEFAULT_ADMIN.password;
+}
+async function warmAndCheckExpiry(){
+  await getCollection('members');   // ensure the local cache has the latest before checking
+  await runAutoExpireCheck();
+}
+async function checkNeedsBootstrap(){
+  const users = await getCollection('users');
+  return !users.some(u=>u.role==='super_admin');
+}
+
+async function handleBootstrapSubmit(e){
+  e.preventDefault();
+  const name = document.getElementById('bs-name').value.trim();
+  const email = document.getElementById('bs-email').value.trim();
+  const password = document.getElementById('bs-password').value;
+  const errEl = document.getElementById('bs-error');
+  errEl.textContent = '';
+  try{
+    if(firebaseReady){
+      const cred = await auth.createUserWithEmailAndPassword(email, password);
+      await setDocumentWithId('users', cred.user.uid, { name, email, role:'super_admin', createdAt:new Date().toISOString() });
+      // initCloudAuth's onAuthStateChanged listener picks this up from here.
+    } else {
+      const rec = LocalStore.add('users', { name, email, password, role:'super_admin', createdAt:new Date().toISOString() });
+      LocalStore.setSingleton('session', { userId: rec.id });
+      state.currentUser = { uid: rec.id, isLocal:true };
+      state.profile = { id: rec.id, name, email, role:'super_admin' };
+      state.route = 'admin/summary';
+      await loadRoute();
+    }
+  }catch(err){
+    errEl.textContent = err.message || 'Could not create the account.';
+  }
+}
+
+async function handleLogin(e){
+  e.preventDefault();
+  const email = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  const errEl = document.getElementById('login-error');
+  errEl.textContent = '';
+  try{
+    if(firebaseReady){
+      await auth.signInWithEmailAndPassword(email, password);
+    } else {
+      const users = LocalStore.getAll('users');
+      const u = users.find(x=>x.email.toLowerCase()===email.toLowerCase() && x.password===password);
+      if(!u) throw new Error('Invalid email or password.');
+      LocalStore.setSingleton('session', { userId: u.id });
+      state.currentUser = { uid: u.id, isLocal:true };
+      state.profile = { id: u.id, name:u.name, email:u.email, role:u.role };
+      await warmAndCheckExpiry();
+      state.route = routeForRole(u.role);
+      await loadRoute();
+    }
+  }catch(err){
+    errEl.textContent = 'Invalid email or password.';
+  }
+}
+
+function handleLogout(){
+  if(firebaseReady){
+    auth.signOut();
+  } else {
+    LocalStore.setSingleton('session', null);
+    state.currentUser = null; state.profile = null; state.route = 'login';
+    render();
+  }
+}
+
+function initCloudAuth(){
+  auth.onAuthStateChanged(async (user) => {
+    state.authResolved = false;
+    try{
+      if(user){
+        let profileData = null;
+        try{
+          const doc = await withTimeout(db.collection('users').doc(user.uid).get(), 6000);
+          profileData = doc.exists ? doc.data() : null;
+          if(profileData) LocalStore.setDoc('users', user.uid, profileData);
+        }catch(e){
+          console.warn('Could not reach Firestore for the profile — using local cache.', e);
+          profileData = LocalStore.getAll('users').find(u=>u.id===user.uid) || null;
+        }
+        if(!profileData){
+          await auth.signOut();
+          state.currentUser = null; state.profile = null;
+        } else {
+          state.currentUser = user;
+          state.profile = { id: user.uid, ...profileData };
+          await warmAndCheckExpiry();
+          state.route = routeForRole(state.profile.role);
+        }
+      } else {
+        state.currentUser = null; state.profile = null;
+        state.needsBootstrap = await checkNeedsBootstrap();
+        state.route = 'login';
+      }
+    } finally {
+      state.authResolved = true;
+      await loadRoute();
+    }
+  });
+}
+
+async function initLocalAuth(){
+  state.authResolved = false;
+  try{
+    ensureDefaultAdmin(); // guarantees adithya@business.com always works
+    const users = LocalStore.getAll('users');
+    const session = LocalStore.getSingleton('session');
+    const sessionUser = session ? users.find(u=>u.id===session.userId) : null;
+    if(sessionUser){
+      state.currentUser = { uid: sessionUser.id, isLocal:true };
+      state.profile = { id: sessionUser.id, name:sessionUser.name, email:sessionUser.email, role:sessionUser.role };
+      await warmAndCheckExpiry();
+      state.route = routeForRole(sessionUser.role);
+    } else {
+      state.currentUser = null; state.profile = null;
+      state.needsBootstrap = false; // local mode always has the default admin — no bootstrap needed
+      state.route = 'login';
+    }
+  } finally {
+    state.authResolved = true;
+    await loadRoute();
+  }
+}
+
+async function boot(){
+  applyTheme();
+  render(); // shows the loading state immediately — never blocks on network
+  if(FIREBASE_ENABLED){
+    firebaseReady = await probeFirebase();
+  }
+  if(firebaseReady) initCloudAuth();
+  else await initLocalAuth();
+}
+boot();
+
+/* ---------------- Views: Login / Bootstrap ---------------- */
+function viewBootstrap(){
+  return `
+  <div class="login-shell">
+    <div class="login-brand">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div style="width:36px;height:36px;border-radius:10px;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;font-weight:800;font-family:'Plus Jakarta Sans',sans-serif;">B</div>
+        <span style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:18px;">Blue Space</span>
+      </div>
+      <div>
+        ${ICONS.dumbbell.replace('width="17" height="17"','width="36" height="36"')}
+        <h2 class="font-display" style="font-size:26px;line-height:1.3;max-width:380px;margin:16px 0 8px;">Let's set up your Super Admin account.</h2>
+        <p style="color:rgba(255,255,255,.8);max-width:360px;font-size:14px;margin:0;">This only shows up once — no Super Admin exists in your Firebase project yet.</p>
+      </div>
+      <p style="color:rgba(255,255,255,.55);font-size:12px;margin:0;">Once created, you can add Staff and Trainer logins from the Users page.</p>
+    </div>
+    <div class="login-form-wrap">
+      <form class="login-form" onsubmit="handleBootstrapSubmit(event)">
+        <h1 style="font-size:24px;margin:0 0 4px;">Create Super Admin</h1>
+        <p class="muted" style="margin:0 0 24px;">This becomes your first login.</p>
+        <label class="label" for="bs-name">Full name</label>
+        <input class="input" style="margin-bottom:14px;" id="bs-name" required />
+        <label class="label" for="bs-email">Email</label>
+        <input class="input" style="margin-bottom:14px;" id="bs-email" type="email" required />
+        <label class="label" for="bs-password">Password</label>
+        <input class="input" style="margin-bottom:6px;" id="bs-password" type="password" minlength="6" required />
+        <p id="bs-error" style="color:var(--danger);font-size:13px;min-height:18px;margin:6px 0 0;"></p>
+        <button class="btn-primary" style="width:100%;margin-top:12px;" type="submit">Create account</button>
+      </form>
+    </div>
+  </div>`;
+}
+function viewLogin(){
+  return `
+  <div class="login-shell">
+    <div class="login-brand">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div style="width:36px;height:36px;border-radius:10px;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;font-weight:800;font-family:'Plus Jakarta Sans',sans-serif;">B</div>
+        <span style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:18px;">Blue Space</span>
+      </div>
+      <div>
+        ${ICONS.dumbbell.replace('width="17" height="17"','width="36" height="36"')}
+        <h2 class="font-display" style="font-size:28px;line-height:1.25;max-width:380px;margin:16px 0 8px;">Run your gym's members, sales and billing in one place.</h2>
+        <p style="color:rgba(255,255,255,.8);max-width:360px;font-size:14px;margin:0;">Memberships, renewals, trainers and GST-ready invoicing — built for your team.</p>
+      </div>
+      <p style="color:rgba(255,255,255,.55);font-size:12px;margin:0;">Backed by Firebase — your data lives in your own project.</p>
+    </div>
+    <div class="login-form-wrap">
+      <form class="login-form" onsubmit="handleLogin(event)">
+        <h1 style="font-size:24px;margin:0 0 4px;">Welcome back</h1>
+        <p class="muted" style="margin:0 0 28px;">Log in to your dashboard.</p>
+        <label class="label" for="login-email">Email</label>
+        <input class="input" style="margin-bottom:14px;" id="login-email" type="email" placeholder="you@yourgym.com" required />
+        <label class="label" for="login-password">Password</label>
+        <input class="input" style="margin-bottom:6px;" id="login-password" type="password" placeholder="••••••••" required />
+        <p id="login-error" style="color:var(--danger);font-size:13px;min-height:18px;margin:6px 0 0;"></p>
+        <button class="btn-primary" style="width:100%;margin-top:12px;" type="submit">Log in</button>
+      </form>
+    </div>
+  </div>`;
+}
+
+/* ---------------- Shell (sidebar + topbar) ---------------- */
+const NAV = {
+  super_admin: [
+    ['admin/summary','Summary', ICONS.dashboard],
+    ['admin/members','Members', ICONS.users],
+    ['admin/sales','Sales Funnel', ICONS.kanban],
+    ['admin/invoices','Invoices', ICONS.receipt],
+    ['admin/plans','Plans', ICONS.clipboard],
+    ['admin/users','Users', ICONS.usercog],
+    ['admin/settings','Gym Settings', ICONS.settings],
+  ],
+  staff: [
+    ['staff/dashboard','Dashboard', ICONS.dashboard],
+    ['staff/members','Members', ICONS.users],
+    ['staff/invoices','Generate Invoice', ICONS.receipt],
+    ['staff/sales','Sales Funnel', ICONS.kanban],
+  ],
+  trainer: [
+    ['trainer/dashboard','Dashboard', ICONS.dashboard],
+    ['trainer/members','My Members', ICONS.dumbbell],
+  ],
+};
+const TITLES = {
+  'admin/summary':'Summary','admin/members':'Members','admin/sales':'Sales Funnel','admin/invoices':'Invoices',
+  'admin/plans':'Plans','admin/users':'Users','admin/settings':'Gym Settings',
+  'staff/dashboard':'Dashboard','staff/members':'Members','staff/invoices':'Generate Invoice','staff/sales':'Sales Funnel',
+  'trainer/dashboard':'Dashboard','trainer/members':'My Members',
+};
+
+function sidebarHTML(){
+  const role = state.profile.role;
+  const items = NAV[role];
+  const dark = state.theme.sidebar === 'dark';
+  return `
+  <aside class="sidebar ${dark?'dark-side':''} ${state.mobileOpen ? 'mobile-open':''}">
+    <div class="sidebar-logo">
+      <div class="mark">B</div>
+      <span class="font-display" style="font-weight:700;">Blue Space</span>
+    </div>
+    <nav class="sidebar-nav">
+      ${items.map(([route,label,icon])=>`
+        <button class="nav-item ${state.route===route?'active':''}" onclick="navigate('${route}')">
+          ${icon}<span>${label}</span>
+        </button>`).join('')}
+    </nav>
+    <div class="sidebar-footer">
+      <p class="name">${state.profile.name}</p>
+      <p class="role">${role.replace('_',' ')}</p>
+      <button class="nav-item" style="padding:8px 12px;" onclick="handleLogout()">${ICONS.logout}<span>Log out</span></button>
+    </div>
+  </aside>`;
+}
+function shellWrap(bodyHTML){
+  return `
+  <div class="shell">
+    ${sidebarHTML()}
+    <div class="main">
+      <div class="topbar">
+        <div style="display:flex;align-items:center;">
+          <button class="hamburger" onclick="state.mobileOpen=!state.mobileOpen; render();">${ICONS.menu}</button>
+          <h1>${TITLES[state.route] || ''}</h1>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span class="badge" style="background:${firebaseReady?'var(--success-bg)':'var(--warn-bg)'};color:${firebaseReady?'var(--success)':'var(--warn)'};" title="${firebaseReady?'Synced with your Firebase project':'Data is saved in this browser only — configure Firebase to sync to the cloud'}">
+            ${firebaseReady ? 'Cloud connected' : 'Local mode'}
+          </span>
+          <button class="icon-btn" title="Toggle dark mode" onclick="toggleAppMode()">${state.theme.mode==='dark'?ICONS.sun:ICONS.moon}</button>
+          <button class="icon-btn" title="Notifications">${ICONS.bell}</button>
+        </div>
+      </div>
+      <div class="content">${bodyHTML}</div>
+    </div>
+  </div>
+  <div id="toast-slot"></div>`;
+}
+
+/* ---------------- Reusable "DataTable": search + sort + pagination ---------------- */
+const PAGE_SIZE = 8;
+function tableState(key){
+  if(!state.tables[key]) state.tables[key] = { query:'', sortKey:null, sortDir:'asc', page:1 };
+  return state.tables[key];
+}
+function dataTableHTML(key, columns, rows, searchKeys){
+  const t = tableState(key);
+  let filtered = rows;
+  if(t.query.trim()){
+    const q = t.query.toLowerCase();
+    filtered = rows.filter(r => searchKeys.some(k => String(r[k]??'').toLowerCase().includes(q)));
+  }
+  if(t.sortKey){
+    filtered = [...filtered].sort((a,b) => {
+      const av=a[t.sortKey]??'', bv=b[t.sortKey]??'';
+      if(typeof av==='number' && typeof bv==='number') return t.sortDir==='asc' ? av-bv : bv-av;
+      return t.sortDir==='asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+    });
+  }
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  if(t.page > totalPages) t.page = totalPages;
+  const pageRows = filtered.slice((t.page-1)*PAGE_SIZE, t.page*PAGE_SIZE);
+
+  return `
+  ${searchKeys.length ? `
+  <div class="search-wrap">
+    ${ICONS.search}
+    <input class="input" placeholder="Search…" value="${t.query}" oninput="tableState('${key}').query=this.value; tableState('${key}').page=1; render();" />
+  </div>` : ''}
+  <div style="overflow-x:auto;">
+    <table>
+      <thead><tr>
+        ${columns.map(c=>`
+          <th class="${c.sortable?'sortable':''}" ${c.sortable?`onclick="sortTable('${key}','${c.key}')"`:''}>
+            ${c.label} ${c.sortable && t.sortKey===c.key ? (t.sortDir==='asc'?ICONS.chevUp:ICONS.chevDown) : ''}
+          </th>`).join('')}
+      </tr></thead>
+      <tbody>
+        ${pageRows.map(row => `<tr>${columns.map(c=>`<td>${c.render ? c.render(row) : (row[c.key] ?? '')}</td>`).join('')}</tr>`).join('') ||
+          `<tr><td colspan="${columns.length}" class="empty-state">No records.</td></tr>`}
+      </tbody>
+    </table>
+  </div>
+  ${totalPages > 1 ? `
+  <div class="row-between" style="margin-top:14px;margin-bottom:0;">
+    <span class="muted">Page ${t.page} of ${totalPages} · ${filtered.length} results</span>
+    <div style="display:flex;gap:6px;">
+      <button class="btn-secondary" style="padding:6px 12px;font-size:12px;" ${t.page===1?'disabled':''} onclick="tableState('${key}').page--; render();">Prev</button>
+      <button class="btn-secondary" style="padding:6px 12px;font-size:12px;" ${t.page===totalPages?'disabled':''} onclick="tableState('${key}').page++; render();">Next</button>
+    </div>
+  </div>` : ''}`;
+}
+function sortTable(key, col){
+  const t = tableState(key);
+  if(t.sortKey === col) t.sortDir = t.sortDir === 'asc' ? 'desc' : 'asc';
+  else { t.sortKey = col; t.sortDir = 'asc'; }
+  render();
+}
+
+/* ---------------- Membership expiry buckets ---------------- */
+function expiryBuckets(members){
+  const ranges = [
+    { label:'Expiring today', min:0, max:0, bg:'var(--danger-bg)', fg:'var(--danger)' },
+    { label:'Next 3 days', min:1, max:3, bg:'var(--danger-bg)', fg:'var(--danger)' },
+    { label:'Next 7 days', min:4, max:7, bg:'var(--warn-bg)', fg:'var(--warn)' },
+    { label:'Next 15 days', min:8, max:15, bg:'var(--a-orange-bg)', fg:'var(--a-orange)' },
+    { label:'Next 30 days', min:16, max:30, bg:'var(--a-blue-bg)', fg:'var(--a-blue)' },
+  ];
+  const today = todayISO();
+  return ranges.map(r => ({
+    ...r,
+    members: members.filter(m => {
+      if(m.status==='expired' || !m.expiryDate) return false;
+      const diff = daysBetween(today, m.expiryDate);
+      return diff>=r.min && diff<=r.max;
+    }),
+  }));
+}
+
+/* ---------------- Real chart aggregation from Firestore data ---------------- */
+function lastNMonths(n){
+  const out = [];
+  const d = new Date();
+  d.setDate(1);
+  for(let i=n-1;i>=0;i--){
+    const dt = new Date(d.getFullYear(), d.getMonth()-i, 1);
+    out.push({ year: dt.getFullYear(), month: dt.getMonth(), label: dt.toLocaleString('en-US',{month:'short'}) });
+  }
+  return out;
+}
+function monthKeyOf(dateStr){
+  const d = new Date(dateStr);
+  return `${d.getFullYear()}-${d.getMonth()}`;
+}
+function buildChartData(invoices, members, users){
+  const months = lastNMonths(6);
+  const revenueByMonth = {}, membersByMonth = {}, trainersByMonth = {};
+  months.forEach(m => { revenueByMonth[`${m.year}-${m.month}`]=0; membersByMonth[`${m.year}-${m.month}`]=0; trainersByMonth[`${m.year}-${m.month}`]=0; });
+
+  invoices.forEach(inv => {
+    if(!inv.date) return;
+    const key = monthKeyOf(inv.date);
+    if(key in revenueByMonth) revenueByMonth[key] += (inv.total||0);
+  });
+  members.forEach(m => {
+    if(!m.startDate) return;
+    const key = monthKeyOf(m.startDate);
+    if(key in membersByMonth) membersByMonth[key] += 1;
+  });
+  users.filter(u=>u.role==='trainer').forEach(u => {
+    if(!u.createdAt) return;
+    const key = monthKeyOf(u.createdAt);
+    if(key in trainersByMonth) trainersByMonth[key] += 1;
+  });
+
+  const revenue = months.map(m => revenueByMonth[`${m.year}-${m.month}`]);
+  const growth = revenue.map((v,i) => {
+    if(i===0) return 0;
+    const prev = revenue[i-1];
+    return prev === 0 ? (v>0?100:0) : Math.round(((v-prev)/prev)*100);
+  });
+  return {
+    labels: months.map(m=>m.label),
+    revenue,
+    growth,
+    membersJoined: months.map(m => membersByMonth[`${m.year}-${m.month}`]),
+    trainersJoined: months.map(m => trainersByMonth[`${m.year}-${m.month}`]),
+  };
+}
+function destroyCharts(){ Object.values(state.charts).forEach(c=>c&&c.destroy()); state.charts = {}; }
+function baseChartOpts(){
+  return {
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ display:false } },
+    scales:{
+      x:{ grid:{ display:false }, ticks:{ color:'#8A90A6', font:{ size:11 } } },
+      y:{ grid:{ color:'rgba(138,144,166,.15)' }, ticks:{ color:'#8A90A6', font:{ size:11 } } },
+    },
+  };
+}
+function initSummaryCharts(data){
+  destroyCharts();
+  const ids = ['chart-revenue','chart-growth','chart-members','chart-trainers'];
+  if(!document.getElementById(ids[0])) return;
+  state.charts.revenue = new Chart(document.getElementById('chart-revenue'), {
+    type:'line', data:{ labels:data.labels, datasets:[{ data:data.revenue, borderColor:'#4F6EF7', backgroundColor:'rgba(79,110,247,.12)', fill:true, tension:.4, pointRadius:3, pointBackgroundColor:'#4F6EF7' }] }, options:baseChartOpts(),
+  });
+  state.charts.growth = new Chart(document.getElementById('chart-growth'), {
+    type:'line', data:{ labels:data.labels, datasets:[{ data:data.growth, borderColor:'#8B5CF6', backgroundColor:'rgba(139,92,246,.12)', fill:true, tension:.4, pointRadius:3, pointBackgroundColor:'#8B5CF6' }] }, options:baseChartOpts(),
+  });
+  state.charts.members = new Chart(document.getElementById('chart-members'), {
+    type:'bar', data:{ labels:data.labels, datasets:[{ data:data.membersJoined, backgroundColor:'#FB923C', borderRadius:6, maxBarThickness:26 }] }, options:baseChartOpts(),
+  });
+  state.charts.trainers = new Chart(document.getElementById('chart-trainers'), {
+    type:'bar', data:{ labels:data.labels, datasets:[{ data:data.trainersJoined, backgroundColor:'#F472B6', borderRadius:6, maxBarThickness:26 }] }, options:baseChartOpts(),
+  });
+}
+
+/* ---------------- Super Admin: Summary ---------------- */
+function viewAdminSummary(){
+  const invoices = state.cache.invoices || [];
+  const members = state.cache.members || [];
+  const revenue = invoices.reduce((s,i)=>s+(i.total||0),0);
+  const activeMembers = members.filter(m=>m.status==='active');
+  const today = new Date(); const in7 = new Date(); in7.setDate(today.getDate()+7);
+  const expiring = members.filter(m=>{
+    if(!m.expiryDate || m.status==='expired') return false;
+    const d = new Date(m.expiryDate);
+    return d>=today && d<=in7;
+  });
+  const buckets = expiryBuckets(members);
+
+  return `
+  <div class="hero">
+    <div>
+      <h2>Welcome back, ${state.profile.name.split(' ')[0]}</h2>
+      <p>Here's how your gym is performing this month.</p>
+    </div>
+    <div class="hero-stats">
+      <div class="hs"><div class="hv">${fmtINR(revenue)}</div><div class="hl">Total revenue</div></div>
+      <div class="hs"><div class="hv">${activeMembers.length}</div><div class="hl">Active members</div></div>
+      <div class="hs"><div class="hv">${invoices.length}</div><div class="hl">Invoices raised</div></div>
+    </div>
+  </div>
+
+  <div class="grid grid-4" style="margin-bottom:20px;">
+    <div class="card stat-card"><div><p class="lbl">Total revenue</p><p class="val">${fmtINR(revenue)}</p></div><div class="stat-icon" style="background:var(--a-blue-bg);color:var(--a-blue);">${ICONS.rupee}</div></div>
+    <div class="card stat-card"><div><p class="lbl">Invoices raised</p><p class="val">${invoices.length}</p></div><div class="stat-icon" style="background:var(--a-purple-bg);color:var(--a-purple);">${ICONS.receipt}</div></div>
+    <div class="card stat-card"><div><p class="lbl">Active members</p><p class="val">${activeMembers.length}</p></div><div class="stat-icon" style="background:var(--a-pink-bg);color:var(--a-pink);">${ICONS.users}</div></div>
+    <div class="card stat-card"><div><p class="lbl">Expiring in 7 days</p><p class="val">${expiring.length}</p></div><div class="stat-icon" style="background:var(--warn-bg);color:var(--warn);">${ICONS.alert}</div></div>
+  </div>
+
+  <div class="grid grid-2" style="margin-bottom:20px;">
+    <div class="card chart-card"><h2 class="section-title" style="margin-bottom:12px;">Revenue trend</h2><canvas id="chart-revenue" height="90"></canvas></div>
+    <div class="card chart-card"><h2 class="section-title" style="margin-bottom:12px;">Monthly revenue growth (%)</h2><canvas id="chart-growth" height="90"></canvas></div>
+    <div class="card chart-card"><h2 class="section-title" style="margin-bottom:12px;">Members joined</h2><canvas id="chart-members" height="90"></canvas></div>
+    <div class="card chart-card"><h2 class="section-title" style="margin-bottom:12px;">Trainers joined</h2><canvas id="chart-trainers" height="90"></canvas></div>
+  </div>
+
+  <div class="card" style="margin-bottom:20px;">
+    <h2 class="section-title" style="margin-bottom:6px;">${ICONS.calendar} Membership expiry breakdown</h2>
+    <p class="muted" style="margin:0 0 8px;">How many members fall into each expiry window right now.</p>
+    ${buckets.map(b=>`
+      <div class="bucket-row">
+        <div class="bucket-count" style="background:${b.bg};color:${b.fg};">${b.members.length}</div>
+        <div style="flex:1;min-width:0;">
+          <p style="margin:0;font-size:14px;font-weight:500;">${b.label}</p>
+          <p class="muted" style="margin:2px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+            ${b.members.length ? b.members.map(m=>m.name).join(', ') : 'No members in this window'}
+          </p>
+        </div>
+      </div>`).join('')}
+  </div>
+
+  <div class="card">
+    <div class="row-between">
+      <h2 class="section-title">Expiring within 7 days — detail</h2>
+      <button class="btn-secondary" onclick='exportToExcel(${JSON.stringify(expiring.map(m=>({Name:m.name,Email:m.email,Phone:m.phone,"Expiry Date":formatDMY(m.expiryDate),Plan:m.planName})))}, "expiring-memberships")'>${ICONS.download} Export Excel</button>
+    </div>
+    <table>
+      <thead><tr><th>Member</th><th>Plan</th><th>Expiry</th><th>Contact</th></tr></thead>
+      <tbody>
+        ${expiring.map(m=>`<tr><td>${m.name}</td><td>${m.planName||'—'}</td><td>${formatDMY(m.expiryDate)}</td><td class="muted">${m.phone||''}</td></tr>`).join('') || `<tr><td colspan="4" class="empty-state">Nothing expiring in the next 7 days.</td></tr>`}
+      </tbody>
+    </table>
+  </div>`;
+}
+
+/* ---------------- Members (shared: admin + staff) ---------------- */
+function trainerNameOf(id, users){ const t=(users||[]).find(u=>u.id===id && u.role==='trainer'); return t?t.name:'—'; }
+function viewMembers(editable){
+  const members = state.cache.members || [];
+  const users = state.cache.users || [];
+  const columns = [
+    { key:'name', label:'Name', sortable:true, render:(m)=>`<div><p style="margin:0;font-weight:500;">${m.name}</p><p class="muted" style="margin:0;">${m.email||''}</p></div>` },
+    { key:'planName', label:'Plan', sortable:true, render:(m)=>m.planName||'—' },
+    { key:'trainerId', label:'Trainer', render:(m)=>trainerNameOf(m.trainerId, users) },
+    { key:'expiryDate', label:'Expiry', sortable:true, render:(m)=>m.expiryDate?formatDMY(m.expiryDate):'—' },
+    { key:'status', label:'Status', sortable:true, render:(m)=>statusBadgeHTML(m.status) },
+  ];
+  return `
+  <div class="row-between">
+    <p class="muted">${members.length} members</p>
+    ${editable ? `<button class="btn-primary" onclick="state.memberFormOpen=!state.memberFormOpen; render();">${state.memberFormOpen?ICONS.plus:ICONS.plus} ${state.memberFormOpen?'Cancel':'Add member'}</button>` : ''}
+  </div>
+  ${state.memberFormOpen ? memberFormHTML(state.cache.plans||[], users) : ''}
+  <div class="card">${dataTableHTML('members', columns, members, ['name','email','planName','phone'])}</div>`;
+}
+function memberFormHTML(plans, users){
+  const trainers = users.filter(u=>u.role==='trainer');
+  return `
+  <form class="card grid grid-2" style="margin-bottom:16px;" onsubmit="handleAddMember(event)">
+    <div><label class="label">Name</label><input class="input" id="mf-name" required /></div>
+    <div><label class="label">Email (for reminders)</label><input class="input" id="mf-email" type="email" required /></div>
+    <div><label class="label">Phone</label><input class="input" id="mf-phone" /></div>
+    <div><label class="label">Plan</label>
+      <select class="input" id="mf-plan">${plans.map(p=>`<option value="${p.id}">${p.name} — ${fmtINR(p.price)}</option>`).join('')}</select>
+    </div>
+    <div><label class="label">Assigned trainer</label>
+      <select class="input" id="mf-trainer"><option value="">— none —</option>${trainers.map(t=>`<option value="${t.id}">${t.name}</option>`).join('')}</select>
+    </div>
+    <div><label class="label">Start date</label><input class="input" id="mf-start" type="date" value="${todayISO()}" /></div>
+    <div style="grid-column:1/-1;"><button class="btn-primary" type="submit">Save member</button></div>
+  </form>`;
+}
+async function handleAddMember(e){
+  e.preventDefault();
+  const plans = state.cache.plans || [];
+  const planId = document.getElementById('mf-plan').value;
+  const plan = plans.find(p=>p.id===planId);
+  const start = document.getElementById('mf-start').value || todayISO();
+  const expiry = new Date(start); expiry.setMonth(expiry.getMonth() + (plan?.durationMonths||1));
+  await addDocument('members', {
+    name: document.getElementById('mf-name').value,
+    email: document.getElementById('mf-email').value,
+    phone: document.getElementById('mf-phone').value,
+    planId: planId||null, planName: plan?.name||'',
+    trainerId: document.getElementById('mf-trainer').value,
+    startDate: start, expiryDate: expiry.toISOString().slice(0,10), status:'active',
+  });
+  state.memberFormOpen = false;
+  showToast('Member added.');
+  await loadRoute();
+}
+
+/* ---------------- Sales Funnel (kanban) ---------------- */
+const STAGES = [
+  { key:'lead', label:'Leads', color:'var(--a-blue)' },
+  { key:'deal', label:'Deals', color:'var(--a-orange)' },
+  { key:'renewal', label:'Renewals', color:'var(--success)' },
+];
+function viewSalesFunnel(){
+  const cards = state.cache.salesPipeline || [];
+  return `
+  <p class="muted" style="margin-bottom:16px;">Drag a card across stages as a lead turns into a deal, then a renewal.</p>
+  <div class="kanban">
+    ${STAGES.map(stage=>{
+      const stageCards = cards.filter(c=>c.stage===stage.key);
+      return `
+      <div class="kanban-col" ondragover="event.preventDefault()" ondrop="handleDrop('${stage.key}')">
+        <div class="kanban-col-head">
+          <span class="dot" style="background:${stage.color}"></span>
+          <h3 style="font-size:14px;font-weight:600;margin:0;">${stage.label}</h3>
+          <span class="muted" style="margin-left:auto;">${stageCards.length}</span>
+        </div>
+        ${stageCards.map(c=>`
+          <div class="kanban-card" draggable="true" ondragstart="state.dragCardId='${c.id}'">
+            <p class="kname">${c.name}</p>
+            <p class="kmeta">${fmtINR(c.value)} · Due ${c.dueDate?formatDMY(c.dueDate):''}</p>
+          </div>`).join('') || `<p class="kanban-empty">Nothing here yet.</p>`}
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+async function handleDrop(stageKey){
+  if(!state.dragCardId) return;
+  await updateDocument('salesPipeline', state.dragCardId, { stage: stageKey });
+  state.dragCardId = null;
+  await loadRoute();
+}
+
+/* ---------------- Invoices (admin list) ---------------- */
+function viewAdminInvoices(){
+  const invoices = state.cache.invoices || [];
+  const columns = [
+    { key:'number', label:'Invoice No', sortable:true, render:(i)=>`<span style="font-weight:500;">${i.number}</span>` },
+    { key:'date', label:'Date', sortable:true, render:(i)=>`<span class="muted">${formatDMY(i.date)}</span>` },
+    { key:'memberName', label:'Member', sortable:true },
+    { key:'planName', label:'Plan / Add-ons', render:(i)=>`<div><p style="margin:0;">${i.planName}</p>${i.ptPlanName?`<p style="margin:0;color:var(--a-purple);font-size:12px;">+ PT: ${i.ptPlanName}</p>`:''}</div>` },
+    { key:'total', label:'Total', sortable:true, render:(i)=>`<span style="display:block;text-align:right;">${fmtINR(i.total)}</span>` },
+    { key:'raisedBy', label:'Raised by', render:(i)=>`<span class="muted">${i.raisedBy||''}</span>` },
+  ];
+  return `
+  <div class="row-between">
+    <p class="muted">${invoices.length} invoices</p>
+    <button class="btn-secondary" onclick='exportToExcel(${JSON.stringify(invoices.map(i=>({"Invoice No":i.number,Date:formatDMY(i.date),Member:i.memberName,Plan:i.planName,"Personal Training":i.ptPlanName||"—","GST Applied":i.gstEnabled?"Yes":"No",Amount:i.amount,GST:i.gstAmount||0,Total:i.total,"Payment Mode":i.paymentMode,"Raised By":i.raisedBy})))}, "invoices-report")'>${ICONS.download} Export Excel</button>
+  </div>
+  <div class="card">${dataTableHTML('invoices', columns, invoices, ['number','memberName','planName','raisedBy'])}</div>`;
+}
+
+/* ---------------- Plans (Membership + Personal Training) ---------------- */
+function viewPlans(){
+  const plans = state.cache.plans || [];
+  const ptPlans = state.cache.ptPlans || [];
+  return `
+  <div class="pill-tabs" style="margin-bottom:24px;">
+    <button class="pill-tab ${state.plansTab==='membership'?'active':''}" onclick="state.plansTab='membership'; render();">Membership Plans</button>
+    <button class="pill-tab ${state.plansTab==='pt'?'active':''}" onclick="state.plansTab='pt'; render();">Personal Training</button>
+  </div>
+  ${state.plansTab==='membership' ? `
+  <div class="grid" style="grid-template-columns:340px 1fr;">
+    <form class="card" onsubmit="handleAddPlan(event)" style="height:fit-content;">
+      <h2 class="section-title" style="margin-bottom:16px;">${ICONS.plus} New plan</h2>
+      <label class="label">Plan name</label><input class="input" id="pf-name" style="margin-bottom:12px;" required />
+      <label class="label">Price (₹)</label><input class="input" id="pf-price" type="number" style="margin-bottom:12px;" required />
+      <label class="label">HSN / SAC code</label><input class="input" id="pf-hsn" style="margin-bottom:12px;" placeholder="999723" />
+      <label class="label">Duration (months)</label><input class="input" id="pf-duration" type="number" value="1" style="margin-bottom:16px;" required />
+      <button class="btn-primary" style="width:100%;" type="submit">Add plan</button>
+    </form>
+    <div class="card">
+      <h2 class="section-title" style="margin-bottom:16px;">All membership plans</h2>
+      <table>
+        <thead><tr><th>Plan</th><th>Price</th><th>HSN</th><th>Duration</th><th></th></tr></thead>
+        <tbody>
+          ${plans.map(p=>`
+            <tr><td>${p.name}</td><td>${fmtINR(p.price)}</td><td class="muted">${p.hsn||'—'}</td><td class="muted">${p.durationMonths} mo</td>
+            <td style="text-align:right;"><button onclick="handleDeletePlan('${p.id}','plans')" style="background:none;border:none;color:var(--ink-400);">${ICONS.trash}</button></td></tr>
+          `).join('') || `<tr><td colspan="5" class="empty-state">No plans yet.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  </div>` : `
+  <div class="grid" style="grid-template-columns:340px 1fr;">
+    <form class="card" onsubmit="handleAddPt(event)" style="height:fit-content;">
+      <h2 class="section-title" style="margin-bottom:16px;">${ICONS.plus} New PT plan</h2>
+      <label class="label">Plan name</label><input class="input" id="ptf-name" style="margin-bottom:12px;" required />
+      <label class="label">Price (₹)</label><input class="input" id="ptf-price" type="number" style="margin-bottom:12px;" required />
+      <label class="label">HSN / SAC code</label><input class="input" id="ptf-hsn" style="margin-bottom:12px;" placeholder="999723" />
+      <label class="label">Number of sessions</label><input class="input" id="ptf-sessions" type="number" style="margin-bottom:16px;" />
+      <button class="btn-primary" style="width:100%;" type="submit">Add PT plan</button>
+    </form>
+    <div class="card">
+      <h2 class="section-title" style="margin-bottom:4px;">All personal training plans</h2>
+      <p class="muted" style="margin:0 0 16px;">These appear as an optional add-on when staff generate a membership invoice.</p>
+      <table>
+        <thead><tr><th>Plan</th><th>Price</th><th>Sessions</th><th></th></tr></thead>
+        <tbody>
+          ${ptPlans.map(p=>`
+            <tr><td>${p.name}</td><td>${fmtINR(p.price)}</td><td class="muted">${p.sessions||'—'}</td>
+            <td style="text-align:right;"><button onclick="handleDeletePlan('${p.id}','ptPlans')" style="background:none;border:none;color:var(--ink-400);">${ICONS.trash}</button></td></tr>
+          `).join('') || `<tr><td colspan="4" class="empty-state">No PT plans yet.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  </div>`}`;
+}
+async function handleAddPlan(e){
+  e.preventDefault();
+  await addDocument('plans', {
+    name: document.getElementById('pf-name').value,
+    price: Number(document.getElementById('pf-price').value),
+    hsn: document.getElementById('pf-hsn').value,
+    durationMonths: Number(document.getElementById('pf-duration').value),
+  });
+  showToast('Plan added.');
+  await loadRoute();
+}
+async function handleAddPt(e){
+  e.preventDefault();
+  await addDocument('ptPlans', {
+    name: document.getElementById('ptf-name').value,
+    price: Number(document.getElementById('ptf-price').value),
+    hsn: document.getElementById('ptf-hsn').value,
+    sessions: Number(document.getElementById('ptf-sessions').value) || null,
+  });
+  showToast('PT plan added.');
+  await loadRoute();
+}
+async function handleDeletePlan(id, coll){
+  await deleteDocument(coll, id);
+  await loadRoute();
+}
+
+/* ---------------- Users ---------------- */
+function viewUsers(){
+  const users = state.cache.users || [];
+  return `
+  <div class="grid" style="grid-template-columns:340px 1fr;">
+    <form class="card" onsubmit="handleAddUser(event)" style="height:fit-content;">
+      <h2 class="section-title" style="margin-bottom:16px;">${ICONS.usercog} Add user</h2>
+      <label class="label">Name</label><input class="input" id="uf-name" style="margin-bottom:12px;" required />
+      <label class="label">Email</label><input class="input" id="uf-email" type="email" style="margin-bottom:12px;" required />
+      <label class="label">Temporary password</label><input class="input" id="uf-password" style="margin-bottom:12px;" minlength="6" required />
+      <label class="label">Role</label>
+      <select class="input" id="uf-role" style="margin-bottom:16px;">
+        <option value="staff">Staff</option><option value="trainer">Trainer</option><option value="super_admin">Super Admin</option>
+      </select>
+      <button class="btn-primary" style="width:100%;" type="submit">Create user</button>
+      <p id="uf-error" style="color:var(--danger);font-size:13px;margin:10px 0 0;"></p>
+    </form>
+    <div class="card">
+      <h2 class="section-title" style="margin-bottom:16px;">All users</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th></tr></thead>
+        <tbody>
+          ${users.map(u=>`<tr><td>${u.name}</td><td class="muted">${u.email}</td><td><span class="badge badge-active">${(u.role||'').replace('_',' ')}</span></td></tr>`).join('') || `<tr><td colspan="3" class="empty-state">No users yet.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+async function handleAddUser(e){
+  e.preventDefault();
+  const name = document.getElementById('uf-name').value;
+  const email = document.getElementById('uf-email').value.trim();
+  const password = document.getElementById('uf-password').value;
+  const role = document.getElementById('uf-role').value;
+  const errEl = document.getElementById('uf-error');
+  errEl.textContent = '';
+  try{
+    if(firebaseReady){
+      // Create the account on a secondary, throwaway Firebase app instance so
+      // the admin creating this user doesn't get signed out of their own
+      // session (createUserWithEmailAndPassword signs in as the new user on
+      // whichever auth instance you call it on).
+      const secondaryApp = firebase.initializeApp(FIREBASE_CONFIG, 'secondary-' + Date.now());
+      const cred = await secondaryApp.auth().createUserWithEmailAndPassword(email, password);
+      await setDocumentWithId('users', cred.user.uid, { name, email, role, createdAt: new Date().toISOString() });
+      await secondaryApp.auth().signOut();
+      await secondaryApp.delete();
+    } else {
+      // Local-only mode: no real Firebase Auth account to create, so the
+      // password is stored alongside the record for the local login check.
+      LocalStore.add('users', { name, email, password, role, createdAt: new Date().toISOString() });
+    }
+    showToast('User created.');
+    await loadRoute();
+  }catch(err){
+    errEl.textContent = err.message || 'Could not create user.';
+  }
+}
+
+/* ---------------- Gym Settings ---------------- */
+function viewGymSettings(){
+  const g = state.cache.gymSettings || {};
+  return `
+  <form onsubmit="handleSaveSettings(event)" style="max-width:960px;">
+    <div class="grid grid-2">
+      <div style="display:flex;flex-direction:column;gap:16px;">
+        <div class="card">
+          <h2 class="section-title" style="margin-bottom:16px;">Gym profile</h2>
+          <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
+            <div class="logo-preview" id="logo-preview">${g.logoUrl?`<img src="${g.logoUrl}"/>`:`<span class="muted" style="font-size:11px;">Logo</span>`}</div>
+            <label class="btn-secondary file-btn" style="font-size:12px;">${ICONS.download} Upload logo<input type="file" accept="image/*" onchange="handleLogoUpload(event)" /></label>
+          </div>
+          <label class="label">Gym name</label><input class="input" id="gs-name" value="${g.name||''}" style="margin-bottom:12px;" required />
+          <label class="label">Address</label><textarea class="input" id="gs-address" rows="2" style="margin-bottom:12px;">${g.address||''}</textarea>
+          <label class="label">Mobile number</label><input class="input" id="gs-phone" value="${g.phone||''}" />
+        </div>
+
+        <div class="card">
+          <div class="row-between" style="margin-bottom:${g.gstEnabled?'16px':'0'};">
+            <div>
+              <h2 class="section-title">GST</h2>
+              <p class="muted" style="margin:4px 0 0;">Turn on to calculate GST on all invoices. Off = plain invoices, no GST math.</p>
+            </div>
+            <button type="button" class="toggle ${g.gstEnabled?'on':''}" onclick="handleToggleGst()"><span class="knob"></span></button>
+          </div>
+          ${g.gstEnabled ? `<div><label class="label">GSTIN</label><input class="input" id="gs-gstin" value="${g.gstin||''}" placeholder="22AAAAA0000A1Z5" /></div>` : ''}
+        </div>
+
+        <div class="card">
+          <h2 class="section-title" style="margin-bottom:12px;">Appearance</h2>
+          <div class="row-between" style="margin-bottom:0;">
+            <div><p style="margin:0;font-size:14px;font-weight:500;">Sidebar</p><p class="muted" style="margin:2px 0 0;">Light or dark sidebar.</p></div>
+            <div class="pill-tabs">
+              <button type="button" class="pill-tab ${state.theme.sidebar==='light'?'active':''}" onclick="if(state.theme.sidebar!=='light') toggleSidebarTheme();">Light</button>
+              <button type="button" class="pill-tab ${state.theme.sidebar==='dark'?'active':''}" onclick="if(state.theme.sidebar!=='dark') toggleSidebarTheme();">Dark</button>
+            </div>
+          </div>
+          <div class="row-between" style="margin:14px 0 0;">
+            <div><p style="margin:0;font-size:14px;font-weight:500;">App theme</p><p class="muted" style="margin:2px 0 0;">Light or dark mode.</p></div>
+            <div class="pill-tabs">
+              <button type="button" class="pill-tab ${state.theme.mode==='light'?'active':''}" onclick="if(state.theme.mode!=='light') toggleAppMode();">Light</button>
+              <button type="button" class="pill-tab ${state.theme.mode==='dark'?'active':''}" onclick="if(state.theme.mode!=='dark') toggleAppMode();">Dark</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:16px;">
+        <div class="card">
+          <h2 class="section-title" style="margin-bottom:16px;">Payment details</h2>
+          <label class="label">UPI ID</label><input class="input" id="gs-upi" value="${g.upiId||''}" style="margin-bottom:12px;" />
+          <label class="label">Bank transfer details</label>
+          <textarea class="input" id="gs-bank" rows="4" placeholder="Account name:&#10;Account no:&#10;IFSC:&#10;Bank & branch:">${g.bankDetails||''}</textarea>
+        </div>
+        <div class="card">
+          <h2 class="section-title" style="margin-bottom:16px;">Invoice terms &amp; conditions</h2>
+          <textarea class="input" id="gs-terms" rows="6">${g.terms||''}</textarea>
+        </div>
+        <button class="btn-primary" style="width:fit-content;" type="submit">Save settings</button>
+      </div>
+    </div>
+  </form>`;
+}
+function handleToggleGst(){
+  state.cache.gymSettings = state.cache.gymSettings || {};
+  state.cache.gymSettings.gstEnabled = !state.cache.gymSettings.gstEnabled;
+  render();
+}
+// Downscales an image file to a small PNG data URL before storing it in
+// localStorage — an uncompressed photo can be several MB as a data URL,
+// which either blows past the ~5-10MB localStorage quota (silently, unless
+// checked) or makes every save/load of gymSettings sluggish. A logo only
+// ever needs to render at a few dozen pixels, so 240px is plenty.
+function resizeImageToDataURL(file, maxDim){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if(width > height){ if(width > maxDim){ height = Math.round(height*maxDim/width); width = maxDim; } }
+        else { if(height > maxDim){ width = Math.round(width*maxDim/height); height = maxDim; } }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+// The logo is intentionally NOT stored in Firebase Storage — as of late
+// 2024, Cloud Storage for Firebase requires the paid Blaze plan, even
+// though Blaze itself has a free quota. To keep this app fully on the
+// free Spark plan, the logo is resized down small and stored as a data
+// URL directly inside the gymSettings document in Firestore instead —
+// well within Firestore's 1MiB document size limit at this size.
+async function handleLogoUpload(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  try{
+    const dataUrl = await resizeImageToDataURL(file, 240);
+    state.cache.gymSettings = state.cache.gymSettings || {};
+    state.cache.gymSettings.logoUrl = dataUrl;
+    document.getElementById('logo-preview').innerHTML = `<img src="${dataUrl}"/>`;
+  }catch(err){
+    console.warn('Could not process the logo image.', err);
+    showToast('Could not read that image — try a different file.');
+  }
+}
+async function handleSaveSettings(e){
+  e.preventDefault();
+  const g = state.cache.gymSettings || {};
+  g.name = document.getElementById('gs-name').value;
+  g.address = document.getElementById('gs-address').value;
+  g.phone = document.getElementById('gs-phone').value;
+  if(g.gstEnabled) g.gstin = document.getElementById('gs-gstin').value;
+  g.upiId = document.getElementById('gs-upi').value;
+  g.bankDetails = document.getElementById('gs-bank').value;
+  g.terms = document.getElementById('gs-terms').value;
+  await setSingletonDoc('gymSettings', 'main', g);
+  showToast('Gym settings saved.');
+  render();
+}
+
+/* ---------------- Staff dashboard ---------------- */
+function viewStaffDashboard(){
+  const members = state.cache.members || [];
+  const invoices = state.cache.invoices || [];
+  return `
+  <p class="muted" style="margin-bottom:20px;">Welcome back, ${state.profile.name}.</p>
+  <div class="grid grid-3">
+    <div class="card stat-card"><div><p class="lbl">Total members</p><p class="val">${members.length}</p></div><div class="stat-icon" style="background:var(--a-blue-bg);color:var(--a-blue);">${ICONS.users}</div></div>
+    <div class="card stat-card"><div><p class="lbl">Invoices raised</p><p class="val">${invoices.length}</p></div><div class="stat-icon" style="background:var(--a-purple-bg);color:var(--a-purple);">${ICONS.receipt}</div></div>
+    <div class="card" style="cursor:pointer;" onclick="navigate('staff/sales')">
+      <p class="lbl">Sales funnel</p>
+      <p style="color:var(--p-700);font-weight:600;font-size:14px;margin:4px 0 0;">View pipeline →</p>
+    </div>
+  </div>`;
+}
+
+/* ---------------- Staff: Generate Invoice ---------------- */
+function viewGenerateInvoice(){
+  const g = state.cache.gymSettings || {};
+  const members = state.cache.members || [];
+  const plans = state.cache.plans || [];
+  const ptPlans = state.cache.ptPlans || [];
+  const trainers = (state.cache.users || []).filter(u=>u.role==='trainer');
+
+  return `
+  <div class="grid" style="grid-template-columns:1fr 1fr;align-items:start;">
+    <form class="card" onsubmit="handleGenerateInvoice(event)" style="display:flex;flex-direction:column;gap:14px;">
+      <h2 class="section-title">${ICONS.receipt} New invoice</h2>
+
+      <div class="pill-tabs">
+        <button type="button" class="pill-tab ${state.invoiceMode==='existing'?'active':''}" onclick="state.invoiceMode='existing'; render();">Existing member</button>
+        <button type="button" class="pill-tab ${state.invoiceMode==='new'?'active':''}" onclick="state.invoiceMode='new'; render();">New member</button>
+      </div>
+      <p class="muted" style="margin-top:-6px;">
+        ${state.invoiceMode==='new' ? "Enter their details here — generating the invoice adds them to Members automatically." : "Generating renews this member's plan and updates their expiry in Members automatically."}
+      </p>
+
+      ${state.invoiceMode==='existing' ? `
+        <div><label class="label">Member</label>
+          <select class="input" id="gi-member" required>
+            <option value="">Select member</option>
+            ${members.map(m=>`<option value="${m.id}">${m.name}</option>`).join('')}
+          </select>
+        </div>
+      ` : `
+        <div><label class="label">Full name</label><input class="input" id="gi-new-name" required /></div>
+        <div><label class="label">Email (for reminders)</label><input class="input" id="gi-new-email" type="email" required /></div>
+        <div><label class="label">Phone</label><input class="input" id="gi-new-phone" /></div>
+        <div><label class="label">Assigned trainer</label>
+          <select class="input" id="gi-new-trainer"><option value="">— none —</option>${trainers.map(t=>`<option value="${t.id}">${t.name}</option>`).join('')}</select>
+        </div>
+      `}
+
+      <div><label class="label">Plan</label>
+        <select class="input" id="gi-plan" required onchange="recalcInvoiceEndDate()">
+          <option value="">Select plan</option>
+          ${plans.map(p=>`<option value="${p.id}">${p.name} — ${fmtINR(p.price)}</option>`).join('')}
+        </select>
+      </div>
+
+      <div class="grid grid-2">
+        <div><label class="label">Plan start date</label>
+          <input class="input" id="gi-start" type="date" value="${todayISO()}" onchange="recalcInvoiceEndDate()" required />
+        </div>
+        <div><label class="label">Plan end date</label>
+          <input class="input" id="gi-end" type="date" />
+        </div>
+      </div>
+      <p class="muted" style="margin-top:-6px;">Defaults to today, with the end date calculated from the plan's duration — edit either field to override.</p>
+
+      <div style="border:1px solid var(--surface-border);border-radius:12px;padding:14px;">
+        <label style="display:flex;align-items:center;gap:10px;font-size:14px;font-weight:500;cursor:pointer;">
+          <input type="checkbox" id="gi-include-pt" onchange="document.getElementById('gi-pt-select-wrap').style.display=this.checked?'block':'none';" style="width:16px;height:16px;accent-color:var(--p-500);" />
+          Include personal training
+        </label>
+        <div id="gi-pt-select-wrap" style="display:none;margin-top:10px;">
+          <select class="input" id="gi-pt-plan">
+            <option value="">Select PT plan</option>
+            ${ptPlans.map(p=>`<option value="${p.id}">${p.name} — ${fmtINR(p.price)}</option>`).join('')}
+          </select>
+          ${ptPlans.length===0 ? `<p class="muted" style="margin:8px 0 0;">No PT plans set up yet — add one under Plans.</p>` : ''}
+        </div>
+      </div>
+
+      <div><label class="label">Payment mode</label>
+        <select class="input" id="gi-payment"><option>UPI</option><option>Bank Transfer</option><option>Cash</option><option>Card</option></select>
+      </div>
+      <p class="muted">GST is <b>${g.gstEnabled?'ON':'OFF'}</b> for this gym — set in Gym Settings by the super admin.</p>
+      <button class="btn-primary" type="submit" id="gi-submit">Generate invoice</button>
+    </form>
+    <div>
+      <div id="invoice-preview-slot">${state.invoicePreview ? invoicePreviewHTML() : `<div class="card" style="min-height:280px;display:flex;align-items:center;justify-content:center;"><p class="muted">Fill the form to preview the invoice.</p></div>`}</div>
+    </div>
+  </div>`;
+}
+// Auto-fills the end date from the selected plan's duration whenever the
+// plan or start date changes — but only touches the end date field itself,
+// so a manual edit to it afterward isn't clobbered until plan/start change again.
+function recalcInvoiceEndDate(){
+  const planSel = document.getElementById('gi-plan');
+  const startInput = document.getElementById('gi-start');
+  const endInput = document.getElementById('gi-end');
+  if(!planSel || !startInput || !endInput) return;
+  const plan = (state.cache.plans || []).find(p=>p.id===planSel.value);
+  if(!plan || !startInput.value) return;
+  const end = new Date(startInput.value);
+  end.setMonth(end.getMonth() + (plan.durationMonths || 1));
+  endInput.value = end.toISOString().slice(0,10);
+}
+function invoicePreviewHTML(){
+  const inv = state.invoicePreview;
+  const g = state.cache.gymSettings || {};
+  const gstEnabled = inv.gstEnabled;
+  return `
+  <div class="card" style="padding:0;overflow:hidden;margin-bottom:10px;">
+    <div class="invoice" id="invoice-root">
+      <div class="invoice-head">
+        <div style="display:flex;gap:10px;align-items:center;">
+          ${g.logoUrl?`<img class="invoice-logo" src="${g.logoUrl}"/>`:''}
+          <div>
+            <p class="font-display" style="font-weight:700;font-size:16px;margin:0;">${g.name||''}</p>
+            <small>${g.address||''}</small><br/>
+            ${gstEnabled?`<small>GSTIN: ${g.gstin}</small><br/>`:''}
+            <small>${g.phone||''}</small>
+          </div>
+        </div>
+        <div style="text-align:right;">
+          <p class="font-display" style="font-weight:700;color:var(--p-700);font-size:18px;margin:0;">${gstEnabled?'TAX INVOICE':'INVOICE'}</p>
+          <small>No. ${inv.number}</small><br/><small>Date: ${formatDMY(inv.date)}</small>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:16px;">
+        <div>
+          <small style="display:block;margin-bottom:4px;">Billed to</small>
+          <p style="font-size:14px;font-weight:500;margin:0;">${inv.member.name}</p>
+          <small>${inv.member.phone||''}</small><br/><small>${inv.member.email||''}</small>
+        </div>
+        <div style="text-align:right;">
+          <small style="display:block;margin-bottom:4px;">Membership period</small>
+          <p style="font-size:14px;margin:0;">${formatDMY(inv.startDate)} → ${formatDMY(inv.expiryDate)}</p>
+        </div>
+      </div>
+      <table>
+        <thead><tr><th>Description</th>${gstEnabled?'<th>HSN</th>':''}<th style="text-align:right;">Amount</th></tr></thead>
+        <tbody>
+          ${inv.lineItems.map(item=>`<tr><td>${item.name}</td>${gstEnabled?`<td>${item.hsn||'999723'}</td>`:''}<td style="text-align:right;">${fmtINR(item.amount)}</td></tr>`).join('')}
+        </tbody>
+      </table>
+      <div class="totals"><div class="totals-box">
+        <div class="totals-row"><span>Subtotal</span><span>${fmtINR(inv.subtotal)}</span></div>
+        ${gstEnabled?`<div class="totals-row"><span>GST (${inv.gstRate}%)</span><span>${fmtINR(inv.gstAmount)}</span></div>`:''}
+        <div class="totals-row total"><span>Total</span><span>${fmtINR(inv.total)}</span></div>
+      </div></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:#575F79;margin-bottom:16px;">
+        <div><b style="color:#12172E;">Payment mode</b><br/>${inv.paymentMode}</div>
+        <div style="text-align:right;">${g.upiId?`UPI: ${g.upiId}<br/>`:''}${(g.bankDetails||'').replace(/\n/g,'<br/>')}</div>
+      </div>
+      ${g.terms?`<div style="border-top:1px solid #E7EAF3;padding-top:12px;"><b style="font-size:12px;">Terms &amp; Conditions</b><p style="color:#8A90A6;font-size:11px;white-space:pre-line;">${g.terms}</p></div>`:''}
+    </div>
+  </div>
+  <button class="btn-primary" id="pdf-download-btn" style="width:100%;" onclick="downloadInvoicePdf('${inv.number}')">${ICONS.download} Download PDF</button>`;
+}
+function downloadInvoicePdf(number){
+  const node = document.getElementById('invoice-root');
+  const btn = document.getElementById('pdf-download-btn');
+  if(!node) return;
+  if(btn) btn.textContent = 'Preparing PDF…';
+  html2canvas(node, { scale:2, useCORS:true, backgroundColor:'#ffffff' }).then(canvas=>{
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF('p','pt','a4');
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const imgHeight = (canvas.height * pageWidth) / canvas.width;
+    pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, pageWidth, imgHeight);
+    pdf.save(`${number || 'invoice'}.pdf`);
+    if(btn) btn.innerHTML = `${ICONS.download} Download PDF`;
+  }).catch(()=>{
+    if(btn) btn.innerHTML = `${ICONS.download} Download PDF`;
+    showToast('Could not generate the PDF — try again.');
+  });
+}
+async function handleGenerateInvoice(e){
+  e.preventDefault();
+  const submitBtn = document.getElementById('gi-submit');
+  submitBtn.disabled = true; submitBtn.textContent = 'Generating…';
+
+  try{
+    const plans = state.cache.plans || [];
+    const ptPlans = state.cache.ptPlans || [];
+    const plan = plans.find(p=>p.id===document.getElementById('gi-plan').value);
+    const paymentMode = document.getElementById('gi-payment').value;
+    const includePt = document.getElementById('gi-include-pt').checked;
+    const ptPlan = includePt ? ptPlans.find(p=>p.id===document.getElementById('gi-pt-plan').value) : null;
+    if(!plan){ submitBtn.disabled=false; submitBtn.textContent='Generate invoice'; return; }
+
+    const g = state.cache.gymSettings || {};
+    // Read the (possibly manually-edited) plan dates from the form, falling
+    // back to today + plan duration if either was somehow left empty.
+    const start = document.getElementById('gi-start').value || todayISO();
+    let expiryStr = document.getElementById('gi-end').value;
+    if(!expiryStr){
+      const fallback = new Date(start);
+      fallback.setMonth(fallback.getMonth() + (plan.durationMonths||1));
+      expiryStr = fallback.toISOString().slice(0,10);
+    }
+
+    let member;
+    if(state.invoiceMode === 'new'){
+      const memberDoc = {
+        name: document.getElementById('gi-new-name').value,
+        email: document.getElementById('gi-new-email').value,
+        phone: document.getElementById('gi-new-phone').value,
+        trainerId: document.getElementById('gi-new-trainer').value,
+        planId: plan.id, planName: plan.name,
+        startDate: start, expiryDate: expiryStr, status:'active',
+      };
+      member = await addDocument('members', memberDoc);
+    } else {
+      const members = state.cache.members || [];
+      member = members.find(m=>m.id===document.getElementById('gi-member').value);
+      if(!member){ submitBtn.disabled=false; submitBtn.textContent='Generate invoice'; return; }
+      await updateDocument('members', member.id, {
+        planId: plan.id, planName: plan.name, startDate: start, expiryDate: expiryStr, status:'active',
+      });
+    }
+
+    const number = await nextInvoiceNumber();
+    const gstEnabled = !!g.gstEnabled && !!g.gstin;
+    const gstRate = 18;
+    const lineItems = [{ name: plan.name, hsn: plan.hsn, amount: plan.price||0 }];
+    if(includePt && ptPlan) lineItems.push({ name: `Personal Training — ${ptPlan.name}`, hsn: ptPlan.hsn, amount: ptPlan.price||0 });
+    const subtotal = lineItems.reduce((s,i)=>s+i.amount,0);
+    const gstAmount = gstEnabled ? +(subtotal*(gstRate/100)).toFixed(2) : 0;
+    const total = subtotal + gstAmount;
+
+    const invoiceDoc = {
+      number, date: start, memberId: member.id, memberName: member.name,
+      planId: plan.id, planName: plan.name,
+      ptPlanId: includePt && ptPlan ? ptPlan.id : null,
+      ptPlanName: includePt && ptPlan ? ptPlan.name : null,
+      startDate: start, expiryDate: expiryStr,
+      lineItems, amount: subtotal, gstEnabled, gstRate, gstAmount, total,
+      paymentMode, raisedBy: state.profile.name,
+    };
+    const savedInvoice = await addDocument('invoices', invoiceDoc);
+
+    state.invoicePreview = { ...savedInvoice, member, subtotal };
+    showToast(state.invoiceMode==='new' ? 'Invoice generated and member added.' : 'Invoice generated and membership renewed.');
+    state.invoiceMode = 'existing';
+    await loadRoute();
+  } finally {
+    submitBtn.disabled = false; submitBtn.textContent = 'Generate invoice';
+  }
+}
+
+/* ---------------- Trainer views ---------------- */
+function viewTrainerDashboard(){
+  const mine = state.cache.myMembers || [];
+  const active = mine.filter(m=>m.status==='active');
+  return `
+  <p class="muted" style="margin-bottom:20px;">Welcome back, ${state.profile.name}.</p>
+  <div class="grid grid-2">
+    <div class="card stat-card"><div><p class="lbl">Assigned members</p><p class="val">${mine.length}</p></div><div class="stat-icon" style="background:var(--a-purple-bg);color:var(--a-purple);">${ICONS.dumbbell}</div></div>
+    <div class="card stat-card"><div><p class="lbl">Active</p><p class="val">${active.length}</p></div><div class="stat-icon" style="background:var(--a-blue-bg);color:var(--a-blue);">${ICONS.users}</div></div>
+  </div>`;
+}
+function viewTrainerMembers(){
+  const mine = state.cache.myMembers || [];
+  const columns = [
+    { key:'name', label:'Name', sortable:true, render:(m)=>`<div><p style="margin:0;font-weight:500;">${m.name}</p><p class="muted" style="margin:0;">${m.phone||''}</p></div>` },
+    { key:'planName', label:'Plan', sortable:true, render:(m)=>m.planName||'—' },
+    { key:'expiryDate', label:'Expiry', sortable:true, render:(m)=>m.expiryDate?formatDMY(m.expiryDate):'—' },
+    { key:'status', label:'Status', sortable:true, render:(m)=>statusBadgeHTML(m.status) },
+  ];
+  return `<div class="card">${dataTableHTML('trainerMembers', columns, mine, ['name','phone'])}</div>`;
+}
+
+/* ---------------- Router / render ----------------
+   Split in two on purpose:
+   - render()     : SYNC, redraws from whatever is already in state.cache.
+                    Use this for pure UI state (toggles, search/sort/page,
+                    theme, an in-progress form edit) — it never touches
+                    storage, so it can never wipe an unsaved edit.
+   - loadRoute()  : ASYNC, re-fetches the current route's data then calls
+                    render(). Use this after navigating, logging in, or
+                    after a save/add/delete that changed the backend data.
+*/
+function navigate(route){ state.route = route; state.mobileOpen = false; state.invoicePreview = null; loadRoute(); }
+
+function render(){
+  applyTheme();
+  const app = document.getElementById('app');
+
+  if(!state.authResolved){
+    app.innerHTML = `<div class="spinner-wrap">Loading…</div>`;
+    return;
+  }
+  if(!state.currentUser){
+    app.innerHTML = state.needsBootstrap ? viewBootstrap() : viewLogin();
+    return;
+  }
+
+  let body = '';
+  switch(state.route){
+    case 'admin/summary': body = viewAdminSummary(); break;
+    case 'admin/members': body = viewMembers(true); break;
+    case 'admin/sales': body = viewSalesFunnel(); break;
+    case 'admin/invoices': body = viewAdminInvoices(); break;
+    case 'admin/plans': body = viewPlans(); break;
+    case 'admin/users': body = viewUsers(); break;
+    case 'admin/settings': body = viewGymSettings(); break;
+    case 'staff/dashboard': body = viewStaffDashboard(); break;
+    case 'staff/members': body = viewMembers(true); break;
+    case 'staff/invoices': body = viewGenerateInvoice(); break;
+    case 'staff/sales': body = viewSalesFunnel(); break;
+    case 'trainer/dashboard': body = viewTrainerDashboard(); break;
+    case 'trainer/members': body = viewTrainerMembers(); break;
+    default: body = '<p>Not found.</p>';
+  }
+  app.innerHTML = shellWrap(body);
+
+  if(state.route === 'admin/summary'){
+    const chartData = buildChartData(state.cache.invoices||[], state.cache.members||[], state.cache.users||[]);
+    requestAnimationFrame(() => initSummaryCharts(chartData));
+  }
+  if(state.route === 'staff/invoices'){
+    requestAnimationFrame(recalcInvoiceEndDate);
+  }
+}
+
+async function loadRoute(){
+  applyTheme();
+  const app = document.getElementById('app');
+  if(!state.authResolved){ render(); return; }
+  if(!state.currentUser){ render(); return; }
+  app.innerHTML = shellWrap(`<div class="spinner-wrap" style="min-height:40vh;">Loading…</div>`);
+  await loadAllFor(state.route);
+  render();
+}
+</script>
+</body>
+</html>
