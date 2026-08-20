@@ -773,9 +773,36 @@ async function handleLogin(e){
   const errEl = document.getElementById('login-error');
   errEl.textContent = '';
 
-  // The default admin always works this way, on purpose — it's the
-  // guaranteed way in, whether Firebase is fully set up yet or not.
-  if(email.toLowerCase() === DEFAULT_ADMIN.email.toLowerCase() && password === DEFAULT_ADMIN.password){
+  const isDefaultAdmin = email.toLowerCase() === DEFAULT_ADMIN.email.toLowerCase() && password === DEFAULT_ADMIN.password;
+
+  if(isDefaultAdmin && firebaseReady){
+    // Once Firebase is actually reachable, the default admin needs to
+    // become a REAL authenticated account rather than staying on the local
+    // bypass — a local session has no genuine Firebase Auth token behind
+    // it, and Firestore correctly refuses writes (like creating other
+    // users' profile docs) without one. This provisions it for real the
+    // first time it's used after Firebase comes online, then logs in
+    // normally from then on.
+    try{
+      await auth.signInWithEmailAndPassword(email, password);
+      return; // onAuthStateChanged takes it from here
+    }catch(signInErr){
+      if(signInErr.code === 'auth/user-not-found'){
+        try{
+          const cred = await auth.createUserWithEmailAndPassword(email, password);
+          await setDocumentWithId('users', cred.user.uid, { name: DEFAULT_ADMIN.name, email, role:'super_admin', createdAt:new Date().toISOString() });
+          await setDocumentWithId('system', 'meta', { hasSuperAdmin: true });
+          return; // onAuthStateChanged takes it from here
+        }catch(provisionErr){
+          console.warn('Could not provision the default admin as a real cloud account — using the local session instead.', provisionErr);
+        }
+      } else {
+        console.warn('Default admin cloud sign-in failed — using the local session instead.', signInErr);
+      }
+    }
+  }
+
+  if(isDefaultAdmin){
     ensureDefaultAdmin();
     try{ await loginLocally(email, password); }catch(err){ errEl.textContent = err.message; }
     return;
@@ -798,7 +825,16 @@ async function handleLogin(e){
 }
 
 function handleLogout(){
-  if(firebaseReady){
+  // A local-bypass session (like the default admin before it's provisioned
+  // as a real cloud account) has no real Firebase Auth session behind it —
+  // calling auth.signOut() in that case is a no-op (nothing to sign out of
+  // from Firebase's perspective), so onAuthStateChanged never fires and the
+  // UI never updates. Check for that case first, regardless of firebaseReady.
+  if(state.currentUser && state.currentUser.isLocal){
+    LocalStore.setSingleton('session', null);
+    state.currentUser = null; state.profile = null; state.route = 'login';
+    loadRoute();
+  } else if(firebaseReady){
     auth.signOut();
   } else {
     LocalStore.setSingleton('session', null);
