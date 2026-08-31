@@ -857,6 +857,17 @@ input,select,textarea,button{font-family:inherit;}
 .topbar-search input:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-bg);}
 .topbar-search input::placeholder{color:var(--text3);}
 .topbar-search-icon{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--text3);}
+.search-dropdown{position:absolute;top:calc(100% + 6px);left:0;right:0;background:var(--card);
+  border:1px solid var(--border2);border-radius:12px;box-shadow:var(--shadow);z-index:120;
+  max-height:340px;overflow-y:auto;padding:6px;}
+.search-dropdown-label{font-size:10.5px;font-weight:700;letter-spacing:0.05em;color:var(--text3);
+  text-transform:uppercase;padding:8px 10px 4px;}
+.search-dropdown-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;
+  cursor:pointer;color:var(--primary2);}
+.search-dropdown-item:hover{background:var(--card2);}
+.search-dropdown-item .sdi-title{font-size:13px;font-weight:600;color:var(--text);}
+.search-dropdown-item .sdi-sub{font-size:11.5px;color:var(--text3);}
+.search-dropdown-empty{padding:14px 10px;font-size:12.5px;color:var(--text3);text-align:center;}
 .topbar-spacer{flex:1;}
 .topbar-icon-btn{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;
   justify-content:center;cursor:pointer;background:transparent;border:1px solid var(--border);
@@ -1055,9 +1066,25 @@ tbody tr:hover{background:var(--primary-bg);}
 .login-brand-icon{width:56px;height:56px;border-radius:16px;background:rgba(255,255,255,0.14);
   display:flex;align-items:center;justify-content:center;color:#fff;}
 @media(max-width:850px){.login-brand{display:none;}}
-.login-form-wrap{display:flex;align-items:center;justify-content:center;padding:32px;background:var(--bg);}
+.login-form-wrap{display:flex;align-items:center;justify-content:center;padding:32px;
+  background:var(--bg);position:relative;overflow:hidden;}
+.login-form-wrap::before{content:'';position:absolute;width:480px;height:480px;border-radius:50%;
+  background:radial-gradient(circle,rgba(99,102,241,0.14),transparent 70%);
+  top:-160px;right:-140px;pointer-events:none;}
+.login-form-wrap::after{content:'';position:absolute;width:360px;height:360px;border-radius:50%;
+  background:radial-gradient(circle,rgba(99,102,241,0.08),transparent 70%);
+  bottom:-120px;left:-100px;pointer-events:none;}
+/* Floating gym-equipment line icons — subtle decorative motion so the right
+   panel doesn't feel like empty dead space next to the card. */
+.login-deco{position:absolute;color:var(--border2);opacity:0.55;pointer-events:none;}
+.login-deco.d1{top:10%;right:11%;animation:loginFloat 6.5s ease-in-out infinite;}
+.login-deco.d2{bottom:14%;left:9%;animation:loginFloat 7.5s ease-in-out infinite 0.8s;}
+.login-deco.d3{top:16%;left:13%;animation:loginFloat 5.5s ease-in-out infinite 0.3s;}
+.login-deco.d4{bottom:10%;right:15%;animation:loginFloat 8s ease-in-out infinite 1.4s;}
+@keyframes loginFloat{0%,100%{transform:translateY(0) rotate(0deg);}50%{transform:translateY(-16px) rotate(6deg);}}
+@media(max-width:1100px){.login-deco{display:none;}}
 .login-card{width:100%;max-width:400px;background:var(--card);border:1px solid var(--border);
-  border-radius:20px;padding:36px;box-shadow:var(--shadow);}
+  border-radius:20px;padding:36px;box-shadow:var(--shadow);position:relative;z-index:1;}
 .input-icon-wrap{position:relative;}
 .input-icon-wrap .input-icon{position:absolute;left:12px;top:50%;transform:translateY(-50%);
   color:var(--text3);display:flex;pointer-events:none;}
@@ -1590,6 +1617,8 @@ const Ic=({n,s=16})=>{
     dashboard:<svg {...p}><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>,
     users:<svg {...p}><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
     dumbbell:<svg {...p}><path d="M6.5 6.5l11 11M21 21l-1-1M3 4l1 1M18 3l3 3-3 3M6 15l-3 3 3 3M4.5 9.5l5-5M9.5 19.5l5-5"/></svg>,
+    kettlebell:<svg {...p}><circle cx="12" cy="14.5" r="7"/><path d="M9 8a3 3 0 0 1 6 0v2H9V8z"/></svg>,
+    barbell:<svg {...p}><line x1="2" y1="12" x2="22" y2="12"/><rect x="4" y="7" width="3" height="10" rx="1"/><rect x="17" y="7" width="3" height="10" rx="1"/><rect x="8.5" y="9" width="2" height="6" rx="0.5"/><rect x="13.5" y="9" width="2" height="6" rx="0.5"/></svg>,
     receipt:<svg {...p}><path d="M4 2h16v20l-3-2-3 2-3-2-3 2-3-2-1 1zM9 7h6M9 11h6M9 15h4"/></svg>,
     kanban:<svg {...p}><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18"/></svg>,
     settings:<svg {...p}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9"/></svg>,
@@ -1642,8 +1671,82 @@ const GymLogo=({size=32,radius,src}) =>(
 );
 
 /* ══════════════════════════════════════════════════════════
-   🍞  TOAST
+   🔍  GLOBAL SEARCH (topbar)
+   A real, working search across Members and Invoices — not a
+   shortcut button. Typing shows a live dropdown of matches;
+   picking one navigates to the right page/tab with that query
+   already applied there (via the searchSeed prop pattern).
    ══════════════════════════════════════════════════════════ */
+const GlobalSearch=({onNavigate})=>{
+  const[query,setQuery]=useState('');
+  const[open,setOpen]=useState(false);
+  const wrapRef=useRef(null);
+
+  useEffect(()=>{
+    const onDocClick=e=>{ if(wrapRef.current&&!wrapRef.current.contains(e.target))setOpen(false); };
+    document.addEventListener('mousedown',onDocClick);
+    return()=>document.removeEventListener('mousedown',onDocClick);
+  },[]);
+
+  const q=query.trim().toLowerCase();
+  let memberMatches=[],invoiceMatches=[];
+  if(q.length>0){
+    const members=S.get(SK.MEMBERS,[])||[];
+    const invoices=S.get(SK.INVOICES,[])||[];
+    memberMatches=members.filter(m=>
+      m.name?.toLowerCase().includes(q)||m.phone?.includes(q)||m.email?.toLowerCase().includes(q)
+    ).slice(0,5);
+    invoiceMatches=invoices.filter(i=>
+      i.number?.toLowerCase().includes(q)||i.memberName?.toLowerCase().includes(q)
+    ).slice(0,5);
+  }
+  const hasResults=memberMatches.length>0||invoiceMatches.length>0;
+
+  const go=(page,seedQuery)=>{ onNavigate(page,seedQuery); setQuery(''); setOpen(false); };
+
+  return(
+    <div className="topbar-search" style={{marginLeft:20}} ref={wrapRef}>
+      <span className="topbar-search-icon"><Ic n="search" s={14}/></span>
+      <input
+        placeholder="Search members, invoices…"
+        value={query}
+        onChange={e=>{setQuery(e.target.value);setOpen(true);}}
+        onFocus={()=>{if(query)setOpen(true);}}
+        onKeyDown={e=>{
+          if(e.key==='Enter'){
+            if(memberMatches[0])go('members',memberMatches[0].name);
+            else if(invoiceMatches[0])go('invoices',invoiceMatches[0].number);
+          }else if(e.key==='Escape'){setOpen(false);e.currentTarget.blur();}
+        }}
+      />
+      {open&&q.length>0&&(
+        <div className="search-dropdown">
+          {!hasResults&&<div className="search-dropdown-empty">No matches for "{query}"</div>}
+          {memberMatches.length>0&&<>
+            <div className="search-dropdown-label">Members</div>
+            {memberMatches.map(m=>(
+              <div key={m.id} className="search-dropdown-item" onClick={()=>go('members',m.name)}>
+                <Ic n="users" s={13}/>
+                <div><div className="sdi-title">{m.name}</div><div className="sdi-sub">{m.phone||m.email||'—'}</div></div>
+              </div>
+            ))}
+          </>}
+          {invoiceMatches.length>0&&<>
+            <div className="search-dropdown-label">Invoices</div>
+            {invoiceMatches.map(i=>(
+              <div key={i.id} className="search-dropdown-item" onClick={()=>go('invoices',i.number)}>
+                <Ic n="invoice" s={13}/>
+                <div><div className="sdi-title">{i.number}</div><div className="sdi-sub">{i.memberName||'—'}</div></div>
+              </div>
+            ))}
+          </>}
+        </div>
+      )}
+    </div>
+  );
+};
+
+
 let _toast=null;
 const toast={success:m=>_toast&&_toast(m,'success'),error:m=>_toast&&_toast(m,'error'),info:m=>_toast&&_toast(m,'info')};
 const Toast=()=>{
@@ -1704,9 +1807,13 @@ const Login=({onLogin,settings={}})=>{
             ))}
           </div>
         </div>
-        <p style={{color:'rgba(255,255,255,0.5)',fontSize:12}}>Backed by Firebase — your data lives in your own project.</p>
+        <p style={{color:'rgba(255,255,255,0.5)',fontSize:12,marginTop:36}}>Backed by Firebase — your data lives in your own project.</p>
       </div>
       <div className="login-form-wrap">
+        <div className="login-deco d1"><Ic n="dumbbell" s={64}/></div>
+        <div className="login-deco d2"><Ic n="kettlebell" s={54}/></div>
+        <div className="login-deco d3"><Ic n="barbell" s={46}/></div>
+        <div className="login-deco d4"><Ic n="dumbbell" s={40}/></div>
         <div className="login-card">
           <div style={{display:'flex',justifyContent:'center',marginBottom:20}}>
             <GymLogo size={52} radius={15} src={settings.logo}/>
@@ -1933,7 +2040,7 @@ const Dashboard=({user})=>{
 /* ══════════════════════════════════════════════════════════
    👤  MEMBERS
    ══════════════════════════════════════════════════════════ */
-const Members=({user})=>{
+const Members=({user,searchSeed})=>{
   const isAdmin=user.role==='superadmin'||user.role==='admin'||user.role==='staff';
   const isSuper=user.role==='superadmin';
   const[members,setMembers]=useState(S.get(SK.MEMBERS,[])||[]);
@@ -1945,6 +2052,9 @@ const Members=({user})=>{
   const plans=S.get(SK.PLANS,[])||[];
   const users=S.get(SK.USERS,[])||[];
   const trainers=users.filter(u=>u.role==='trainer');
+
+  // Picked up when the global topbar search sends someone here with a query already typed.
+  useEffect(()=>{ if(searchSeed?.query!==undefined) setQ(searchSeed.query); },[searchSeed?.token]);
 
   const save=()=>{
     if(!form.name.trim()){toast.error('Name required');return;}
@@ -2076,7 +2186,7 @@ const Members=({user})=>{
 /* ══════════════════════════════════════════════════════════
    🧾  INVOICES — Generate & History
    ══════════════════════════════════════════════════════════ */
-const Invoices=({user})=>{
+const Invoices=({user,searchSeed})=>{
   const isAdmin=user.role==='superadmin'||user.role==='admin'||user.role==='staff';
   const[tab,setTab]=useState('generate');
   const[invoices,setInvoices]=useState(S.get(SK.INVOICES,[])||[]);
@@ -2091,6 +2201,14 @@ const Invoices=({user})=>{
   const plans=S.get(SK.PLANS,[])||[];
   const ptPlans=S.get(SK.PTPLANS,[])||[];
   const settings=S.get(SK.SETTINGS,{})||{};
+
+  // Picked up when the global topbar search sends someone here with a query already typed.
+  useEffect(()=>{
+    if(searchSeed?.query!==undefined){
+      setQ(searchSeed.query);
+      setTab('history');
+    }
+  },[searchSeed?.token]);
 
   const generateInvoice=async()=>{
     const plan=plans.find(p=>p.id===form.planId);
@@ -2744,6 +2862,7 @@ const App=()=>{
   const[sidebarCollapsed,setSidebarCollapsed]=useState(false);
   const[mobOpen,setMobOpen]=useState(false);
   const[settingsTick,setSettingsTick]=useState(0); // bump to force re-read of gym settings after save
+  const[searchSeed,setSearchSeed]=useState({page:null,query:'',token:0});
 
   useEffect(()=>{
     (async()=>{
@@ -2812,8 +2931,8 @@ const App=()=>{
 
   const PAGES={
     dashboard:()=>isTrainer?<TrainerView user={user}/>:<Dashboard user={user}/>,
-    members:()=><Members user={user}/>,
-    invoices:()=><Invoices user={user}/>,
+    members:()=><Members user={user} searchSeed={searchSeed.page==='members'?searchSeed:null}/>,
+    invoices:()=><Invoices user={user} searchSeed={searchSeed.page==='invoices'?searchSeed:null}/>,
     plans:()=><Plans user={user}/>,
     sales:()=><SalesFunnel user={user}/>,
     users:()=><UsersAdmin user={user}/>,
@@ -2884,10 +3003,7 @@ const App=()=>{
             <span style={{color:'var(--border2)'}}>›</span>
             <span className="cur">{navItems.find(n=>n.key===page)?.label||'Dashboard'}</span>
           </div>
-          <div className="topbar-search" style={{marginLeft:20}}>
-            <span className="topbar-search-icon"><Ic n="search" s={14}/></span>
-            <input placeholder="Search members, invoices…" readOnly style={{cursor:'pointer'}} onClick={()=>setPage('members')}/>
-          </div>
+          <GlobalSearch onNavigate={(pg,qv)=>{setPage(pg);setSearchSeed({page:pg,query:qv,token:Date.now()});}}/>
           <div className="topbar-spacer"/>
           <div className="topbar-icon-btn" onClick={()=>setTheme(t=>t==='dark'?'light':'dark')} title="Toggle theme">
             {theme==='dark'?<Ic n="sun" s={15}/>:<Ic n="moon" s={15}/>}
