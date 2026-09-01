@@ -1555,6 +1555,28 @@ const downloadInvoicePDF = (inv,settings)=>{
    Assumes intra-state supply (CGST+SGST split), since gym
    membership services are consumed at the gym's own location.
    ══════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════
+   💬  WHATSAPP SEND
+   Opens a WhatsApp chat with the invoice's customer, pre-filled
+   with a summary message. WhatsApp's click-to-chat link can't
+   attach a file, so this also triggers the PDF download and
+   tells the person to attach it themselves in the chat.
+   ══════════════════════════════════════════════════════════ */
+const sendInvoiceWhatsApp = (inv,settings)=>{
+  const digits=(inv.memberPhone||'').replace(/\D/g,'');
+  if(!digits){toast.error(`${inv.memberName||'This member'} has no phone number saved — add one on their profile first.`);return;}
+  const cc=(settings.whatsappCountryCode||'91').replace(/\D/g,'')||'91';
+  const fullNumber=digits.length>10?digits:cc+digits;
+  const gymName=settings.name||'Blue Space';
+  const message=`Hi ${inv.memberName}, here's your invoice ${inv.number} for ${fmt(inv.total)} from ${gymName}. `+
+    `Membership valid ${fmtD(inv.startDate)} to ${fmtD(inv.expiryDate)}. Thank you!`;
+  try{ downloadInvoicePDF(inv,settings); }
+  catch(e){ console.warn('PDF pre-download for WhatsApp failed:',e.message); }
+  window.open(`https://wa.me/${fullNumber}?text=${encodeURIComponent(message)}`,'_blank');
+  toast.success('PDF downloaded — attach it in the WhatsApp chat that just opened.');
+};
+
+
 const exportInvoicesToExcel = (invoices,settings,fromDate,toDate)=>{
   if(!window.XLSX){toast.error('Excel library failed to load. Check your internet connection and reload.');return;}
   const filtered=(invoices||[]).filter(i=>{
@@ -1653,6 +1675,7 @@ const Ic=({n,s=16})=>{
     mail:<svg {...p}><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 6l-10 7L2 6"/></svg>,
     lock:<svg {...p}><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>,
     upload:<svg {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>,
+    whatsapp:<svg {...p} fill="currentColor" stroke="none" viewBox="0 0 24 24"><path d="M12.04 2c-5.46 0-9.9 4.44-9.9 9.9 0 1.75.46 3.45 1.32 4.95L2 22l5.25-1.38a9.87 9.87 0 0 0 4.79 1.22h.01c5.46 0 9.9-4.44 9.9-9.9 0-2.64-1.03-5.13-2.9-6.99A9.82 9.82 0 0 0 12.04 2zm0 1.8c2.16 0 4.2.84 5.72 2.37a8.06 8.06 0 0 1 2.37 5.73c0 4.46-3.63 8.09-8.1 8.09h-.01a8.1 8.1 0 0 1-4.13-1.13l-.3-.17-3.12.82.83-3.04-.19-.31a8.02 8.02 0 0 1-1.24-4.3c0-4.47 3.64-8.06 8.17-8.06zm-4.5 4.6c-.16 0-.42.06-.64.31-.22.25-.85.83-.85 2.02s.87 2.35.99 2.51c.12.16 1.68 2.7 4.16 3.68 2.06.81 2.48.65 2.93.61.45-.04 1.45-.59 1.65-1.16.2-.57.2-1.06.14-1.16-.06-.1-.22-.16-.46-.28-.24-.12-1.45-.71-1.67-.79-.22-.08-.39-.12-.55.12-.16.24-.63.79-.77.95-.14.16-.28.18-.52.06-.24-.12-1.02-.38-1.95-1.21-.72-.64-1.21-1.44-1.35-1.68-.14-.24-.01-.37.11-.49.11-.11.24-.28.36-.42.12-.14.16-.24.24-.4.08-.16.04-.3-.02-.42-.06-.12-.55-1.34-.76-1.83-.2-.48-.4-.42-.55-.42h-.03z"/></svg>,
     key:<svg {...p}><circle cx="7.5" cy="15.5" r="5.5"/><path d="M21 2l-9.6 9.6M15.5 7.5l3 3"/></svg>,
     refresh:<svg {...p}><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>,
     freeze:<svg {...p}><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>,
@@ -2192,6 +2215,7 @@ const Members=({user,searchSeed})=>{
    ══════════════════════════════════════════════════════════ */
 const Invoices=({user,searchSeed})=>{
   const isAdmin=user.role==='superadmin'||user.role==='admin'||user.role==='staff';
+  const isSuper=user.role==='superadmin';
   const[tab,setTab]=useState('generate');
   const[invoices,setInvoices]=useState(S.get(SK.INVOICES,[])||[]);
   const[members,setMembers]=useState(S.get(SK.MEMBERS,[])||[]);
@@ -2247,7 +2271,7 @@ const Invoices=({user,searchSeed})=>{
       memberEmail:memberRec.email||'',
       planId:plan.id,planName:plan.name,ptPlanId:pt?.id||null,ptPlanName:pt?.name||null,
       lineItems,subtotal,gstEnabled:form.gstEnabled,gstRate,gstAmount:gstAmt,total,
-      paymentMode:form.paymentMode,raisedBy:user.name,startDate:form.startDate,
+      paymentMode:form.paymentMode,raisedBy:user.name,raisedById:user.id,startDate:form.startDate,
       expiryDate:nextYear(form.startDate,plan.durationMonths)};
     const allI=[...S.get(SK.INVOICES,[])||[],inv];
     S.set(SK.INVOICES,allI);setInvoices(allI);
@@ -2255,12 +2279,18 @@ const Invoices=({user,searchSeed})=>{
     toast.success('Invoice '+inv.number+' generated!');
   };
 
-  const filteredInv=invoices.filter(i=>!q||i.number?.includes(q)||i.memberName?.toLowerCase().includes(q.toLowerCase()));
+  // Superadmin sees every invoice; everyone else only sees invoices they
+  // personally raised — staff shouldn't be able to browse the whole gym's
+  // billing history, just their own work. raisedById is matched first
+  // (reliable), falling back to a name match for older invoices raised
+  // before that field existed.
+  const visibleInvoices=isSuper?invoices:invoices.filter(i=>i.raisedById===user.id||i.raisedBy===user.name);
+  const filteredInv=visibleInvoices.filter(i=>!q||i.number?.includes(q)||i.memberName?.toLowerCase().includes(q.toLowerCase()));
 
   return(
     <div className="page-enter">
       <div className="page-hdr">
-        <div><div className="page-title">Invoices</div><div className="page-sub">{invoices.length} total</div></div>
+        <div><div className="page-title">Invoices</div><div className="page-sub">{visibleInvoices.length} total</div></div>
       </div>
       <div className="pill-tabs">
         {isAdmin&&<button className={`pill-tab ${tab==='generate'?'active':''}`} onClick={()=>{setTab('generate');setPreview(null);}}>Generate Invoice</button>}
@@ -2375,14 +2405,20 @@ const Invoices=({user,searchSeed})=>{
               Membership valid: {fmtD(preview.startDate)} → {fmtD(preview.expiryDate)}
             </div>
           </div>
-          <button className="btn btn-primary fw" style={{marginTop:10}} onClick={()=>{
-            try{
-              downloadInvoicePDF(preview,settings);
-            }catch(e){
-              console.error('PDF export failed:',e);
-              toast.error('Could not generate PDF: '+e.message);
-            }
-          }}><Ic n="download" s={13}/>Download PDF</button>
+          <div style={{display:'flex',gap:8,marginTop:10}}>
+            <button className="btn btn-primary fw" onClick={()=>{
+              try{
+                downloadInvoicePDF(preview,settings);
+              }catch(e){
+                console.error('PDF export failed:',e);
+                toast.error('Could not generate PDF: '+e.message);
+              }
+            }}><Ic n="download" s={13}/>Download PDF</button>
+            <button className="btn btn-success fw" onClick={()=>{
+              try{sendInvoiceWhatsApp(preview,settings);}
+              catch(e){console.error('WhatsApp send failed:',e);toast.error('Could not open WhatsApp: '+e.message);}
+            }}><Ic n="whatsapp" s={14}/>WhatsApp</button>
+          </div>
         </div>}
       </div>}
 
@@ -2403,8 +2439,8 @@ const Invoices=({user,searchSeed})=>{
             <label className="field-label">To</label>
             <input className="field-input" type="date" value={gstrTo} onChange={e=>setGstrTo(e.target.value)}/>
           </div>
-          {isAdmin&&<button className="btn btn-outline-primary" onClick={()=>{
-            try{exportInvoicesToExcel(invoices,settings,gstrFrom,gstrTo);}
+          {isSuper&&<button className="btn btn-outline-primary" onClick={()=>{
+            try{exportInvoicesToExcel(visibleInvoices,settings,gstrFrom,gstrTo);}
             catch(e){console.error('Excel export failed:',e);toast.error('Could not export Excel: '+e.message);}
           }}><Ic n="download" s={13}/>Export for GSTR-1</button>}
         </div>
@@ -2423,10 +2459,16 @@ const Invoices=({user,searchSeed})=>{
                   <td><span className="badge badge-active">{i.paymentMode}</span></td>
                   <td style={{fontSize:12,color:'var(--text2)'}}>{i.raisedBy}</td>
                   <td>
-                    <button className="btn btn-sm btn-outline" title="Download PDF" onClick={()=>{
-                      try{downloadInvoicePDF(i,settings);}
-                      catch(e){console.error('PDF export failed:',e);toast.error('Could not generate PDF: '+e.message);}
-                    }}><Ic n="download" s={12}/></button>
+                    <div style={{display:'flex',gap:6}}>
+                      <button className="btn btn-sm btn-outline" title="Download PDF" onClick={()=>{
+                        try{downloadInvoicePDF(i,settings);}
+                        catch(e){console.error('PDF export failed:',e);toast.error('Could not generate PDF: '+e.message);}
+                      }}><Ic n="download" s={12}/></button>
+                      <button className="btn btn-sm btn-outline" title="Send via WhatsApp" style={{color:'var(--green)'}} onClick={()=>{
+                        try{sendInvoiceWhatsApp(i,settings);}
+                        catch(e){console.error('WhatsApp send failed:',e);toast.error('Could not open WhatsApp: '+e.message);}
+                      }}><Ic n="whatsapp" s={12}/></button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -2805,7 +2847,12 @@ const GymSettings=({user,onSaved})=>{
           <div className="field"><label className="field-label">GSTIN</label><input className="field-input" value={form.gstin||''} onChange={e=>setForm(p=>({...p,gstin:e.target.value}))} placeholder="29AAAAA0000A1Z5"/></div>
           <div className="field"><label className="field-label">Email</label><input className="field-input" type="email" value={form.email||''} onChange={e=>setForm(p=>({...p,email:e.target.value}))}/></div>
           <div className="field"><label className="field-label">UPI ID</label><input className="field-input" value={form.upiId||''} onChange={e=>setForm(p=>({...p,upiId:e.target.value}))} placeholder="gym@upi"/></div>
-          <div className="field"><label className="field-label">Bank Details</label><textarea className="field-input" rows={2} value={form.bankDetails||''} onChange={e=>setForm(p=>({...p,bankDetails:e.target.value}))} placeholder="Account No, IFSC, Bank"/></div>
+          <div className="field">
+            <label className="field-label">WhatsApp Number</label>
+            <input className="field-input" value={form.whatsapp||''} onChange={e=>setForm(p=>({...p,whatsapp:e.target.value}))} placeholder="+91 98765 43210"/>
+            <div style={{fontSize:11,color:'var(--text3)',marginTop:5}}>Your gym's own WhatsApp contact — shown to members. Invoices are sent to each member's own saved phone number.</div>
+          </div>
+          <div className="field" style={{gridColumn:'1/-1'}}><label className="field-label">Bank Details</label><textarea className="field-input" rows={2} value={form.bankDetails||''} onChange={e=>setForm(p=>({...p,bankDetails:e.target.value}))} placeholder="Account No, IFSC, Bank"/></div>
           <div className="field" style={{gridColumn:'1/-1'}}><label className="field-label">Terms &amp; Conditions (printed on invoice)</label><textarea className="field-input" rows={3} value={form.terms||''} onChange={e=>setForm(p=>({...p,terms:e.target.value}))}/></div>
         </div>
         <div className="toggle-wrap" style={{marginTop:4}} onClick={()=>setForm(p=>({...p,gstEnabled:!p.gstEnabled}))}>
