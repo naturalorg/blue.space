@@ -1118,6 +1118,7 @@ tbody tr:hover{background:var(--primary-bg);}
 
 /* ── TOGGLE SWITCH ── */
 .toggle-wrap{display:flex;align-items:center;gap:10px;cursor:pointer;}
+.toggle-wrap-disabled{cursor:not-allowed;opacity:0.55;}
 .toggle-sw{width:44px;height:24px;border-radius:12px;background:var(--border2);position:relative;
   border:none;cursor:pointer;transition:background 0.2s;flex-shrink:0;}
 .toggle-sw.on{background:var(--primary);}
@@ -1439,7 +1440,7 @@ const downloadInvoicePDF = (inv,settings)=>{
   if(settings.phone){doc.text(settings.phone,textX,addrY);addrY+=4;}
 
   doc.setFont('helvetica','bold');doc.setFontSize(16);doc.setTextColor(67,56,202);
-  doc.text('TAX INVOICE',pageW-marginX,y,{align:'right'});
+  doc.text(inv.gstEnabled?'TAX INVOICE':'INVOICE',pageW-marginX,y,{align:'right'});
   doc.setFont('helvetica','normal');doc.setFontSize(9);doc.setTextColor(110,118,129);
   doc.text('No.',pageW-marginX,y+6,{align:'right'});
   doc.setFont('helvetica','bold');doc.setTextColor(18,23,46);
@@ -2229,6 +2230,10 @@ const Invoices=({user,searchSeed})=>{
   const plans=S.get(SK.PLANS,[])||[];
   const ptPlans=S.get(SK.PTPLANS,[])||[];
   const settings=S.get(SK.SETTINGS,{})||{};
+  // Gym-wide GST master switch — set by the superadmin in Gym Settings.
+  // When this is off, GST can never be applied to an invoice by anyone,
+  // regardless of what the per-invoice toggle below is set to.
+  const gstMasterOn=settings.gstEnabled===true;
 
   // Picked up when the global topbar search sends someone here with a query already typed.
   useEffect(()=>{
@@ -2241,7 +2246,6 @@ const Invoices=({user,searchSeed})=>{
   const generateInvoice=async()=>{
     const plan=plans.find(p=>p.id===form.planId);
     if(!plan){toast.error('Select a plan');return;}
-    const settings=S.get(SK.SETTINGS,{})||{};
     let memberRec;
     if(form.isNew){
       if(!form.newName.trim()){toast.error('Member name required');return;}
@@ -2264,13 +2268,18 @@ const Invoices=({user,searchSeed})=>{
     if(pt)lineItems.push({name:`PT — ${pt.name}`,hsn:pt.hsn||'999723',amount:pt.price||0});
     const subtotal=lineItems.reduce((s,i)=>s+i.amount,0);
     const gstRate=18;
-    const gstAmt=form.gstEnabled?+(subtotal*(gstRate/100)).toFixed(2):0;
+    // GST can only ever apply if the superadmin's gym-wide master switch (Gym
+    // Settings → "Enable GST on invoices") is on — this is enforced here as
+    // a hard backstop regardless of what the per-invoice toggle shows, so a
+    // staff member can never sneak GST onto an invoice with the switch off.
+    const gstApplied=gstMasterOn&&form.gstEnabled;
+    const gstAmt=gstApplied?+(subtotal*(gstRate/100)).toFixed(2):0;
     const total=subtotal+gstAmt;
     const inv={id:genId(),number:nextInvNo(),date:form.startDate,
       memberId:memberRec.id,memberName:memberRec.name,memberPhone:memberRec.phone||'',
       memberEmail:memberRec.email||'',
       planId:plan.id,planName:plan.name,ptPlanId:pt?.id||null,ptPlanName:pt?.name||null,
-      lineItems,subtotal,gstEnabled:form.gstEnabled,gstRate,gstAmount:gstAmt,total,
+      lineItems,subtotal,gstEnabled:gstApplied,gstRate,gstAmount:gstAmt,total,
       paymentMode:form.paymentMode,raisedBy:user.name,raisedById:user.id,startDate:form.startDate,
       expiryDate:nextYear(form.startDate,plan.durationMonths)};
     const allI=[...S.get(SK.INVOICES,[])||[],inv];
@@ -2335,10 +2344,15 @@ const Invoices=({user,searchSeed})=>{
               </select>
             </div>
           </div>
-          <div className="toggle-wrap" style={{marginBottom:14}} onClick={()=>setForm(p=>({...p,gstEnabled:!p.gstEnabled}))}>
-            <div className={`toggle-sw ${form.gstEnabled?'on':''}`}><div className="toggle-knob"/></div>
+          <div className={`toggle-wrap ${gstMasterOn?'':'toggle-wrap-disabled'}`} style={{marginBottom:6}} onClick={()=>{
+            if(!gstMasterOn){toast.info('GST is turned off gym-wide. A superadmin can enable it in Gym Settings.');return;}
+            setForm(p=>({...p,gstEnabled:!p.gstEnabled}));
+          }}>
+            <div className={`toggle-sw ${gstMasterOn&&form.gstEnabled?'on':''}`}><div className="toggle-knob"/></div>
             <span style={{fontSize:13,color:'var(--text2)'}}>Include GST (18%)</span>
           </div>
+          {!gstMasterOn&&<div style={{fontSize:11,color:'var(--text3)',marginBottom:14}}>GST is disabled gym-wide — only a superadmin can turn it on, in Gym Settings.</div>}
+          {gstMasterOn&&<div style={{marginBottom:14}}/>}
           <button className="btn btn-primary" onClick={generateInvoice}><Ic n="check" s={13}/>Generate Invoice</button>
         </div>
 
@@ -2362,7 +2376,7 @@ const Invoices=({user,searchSeed})=>{
                 </div>
               </div>
               <div style={{textAlign:'right'}}>
-                <div style={{fontFamily:'Sora,sans-serif',fontWeight:800,fontSize:16,color:'#4338CA'}}>INVOICE</div>
+                <div style={{fontFamily:'Sora,sans-serif',fontWeight:800,fontSize:16,color:'#4338CA'}}>{preview.gstEnabled?'TAX INVOICE':'INVOICE'}</div>
                 <div style={{fontSize:13,fontWeight:600}}>{preview.number}</div>
                 <div style={{fontSize:12,color:'#575F79'}}>{fmtD(preview.date)}</div>
               </div>
@@ -2857,7 +2871,12 @@ const GymSettings=({user,onSaved})=>{
         </div>
         <div className="toggle-wrap" style={{marginTop:4}} onClick={()=>setForm(p=>({...p,gstEnabled:!p.gstEnabled}))}>
           <div className={`toggle-sw ${form.gstEnabled?'on':''}`}><div className="toggle-knob"/></div>
-          <span style={{fontSize:13,color:'var(--text2)'}}>Enable GST on invoices by default</span>
+          <span style={{fontSize:13,color:'var(--text2)'}}>Enable GST on invoices</span>
+        </div>
+        <div style={{fontSize:11,color:'var(--text3)',marginTop:8,maxWidth:520,lineHeight:1.6}}>
+          This is a gym-wide master switch. When it's off, nobody — including staff — can add GST to
+          an invoice, and invoices print as a plain "INVOICE" instead of a "TAX INVOICE". Turn it on
+          here to let staff choose whether to include GST on each invoice they raise.
         </div>
       </div>
     </div>
