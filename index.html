@@ -1563,6 +1563,45 @@ const downloadInvoicePDF = (inv,settings)=>{
    attach a file, so this also triggers the PDF download and
    tells the person to attach it themselves in the chat.
    ══════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════
+   📊  GOOGLE SHEET SYNC (for automated renewal-reminder emails)
+   Fire-and-forget POST to a Google Apps Script Web App URL,
+   configured in Gym Settings. Uses mode:'no-cors' + text/plain
+   because Apps Script Web Apps don't handle CORS preflight —
+   this is the standard pattern for posting to Apps Script from
+   a plain static page. We can't read the response in this mode,
+   so failures here never block or interrupt invoice generation.
+   ══════════════════════════════════════════════════════════ */
+const syncToGoogleSheet = (payload,settings)=>{
+  const url=(settings.sheetWebhookUrl||'').trim();
+  if(!url)return;
+  try{
+    fetch(url,{
+      method:'POST',
+      mode:'no-cors',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify(payload)
+    }).catch(e=>console.warn('Google Sheet sync failed (network):',e.message));
+  }catch(e){ console.warn('Google Sheet sync failed:',e.message); }
+};
+
+/* ══════════════════════════════════════════════════════════
+   📧  MANUAL EMAIL REMINDER (mailto: — zero setup required)
+   Opens the person's own email client pre-filled with a renewal
+   reminder for one member. Works immediately with no backend,
+   as an instant fallback alongside the Google Sheet automation.
+   ══════════════════════════════════════════════════════════ */
+const mailtoRenewalReminder = (member,settings)=>{
+  if(!member.email){toast.error(`${member.name} has no email address saved.`);return;}
+  const gymName=settings.name||'Blue Space';
+  const subject=`Your membership at ${gymName} is expiring soon`;
+  const body=`Hi ${member.name},\n\nJust a friendly reminder that your ${member.planName||''} membership at ${gymName} `+
+    `is expiring on ${fmtD(member.expiryDate)}. Please renew soon to keep your access active without interruption.\n\n`+
+    `If you have any questions, just reply to this email.\n\nThank you,\n${gymName}`;
+  window.location.href=`mailto:${member.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+};
+
+
 const sendInvoiceWhatsApp = (inv,settings)=>{
   const digits=(inv.memberPhone||'').replace(/\D/g,'');
   if(!digits){toast.error(`${inv.memberName||'This member'} has no phone number saved — add one on their profile first.`);return;}
@@ -1886,6 +1925,7 @@ const Dashboard=({user})=>{
   const canSeeFinance=user.role==='superadmin';
   const members=S.get(SK.MEMBERS,[])||[];
   const invoices=S.get(SK.INVOICES,[])||[];
+  const settings=S.get(SK.SETTINGS,{})||{};
   const revenue=invoices.reduce((s,i)=>s+(i.total||0),0);
   const active=members.filter(m=>m.status==='active');
   const expired=members.filter(m=>m.status==='expired');
@@ -2042,8 +2082,17 @@ const Dashboard=({user})=>{
           {expiring.length===0
             ?<div className="tbl-empty">No memberships expiring in 7 days 🎉</div>
             :<div className="tbl-wrap"><table>
-                <thead><tr><th>Member</th><th>Plan</th><th>Expiry</th></tr></thead>
-                <tbody>{expiring.map(m=><tr key={m.id}><td>{m.name}</td><td>{m.planName||'—'}</td><td style={{color:'var(--warn)',fontWeight:600}}>{fmtD(m.expiryDate)}</td></tr>)}</tbody>
+                <thead><tr><th>Member</th><th>Plan</th><th>Expiry</th><th></th></tr></thead>
+                <tbody>{expiring.map(m=><tr key={m.id}>
+                  <td>{m.name}</td><td>{m.planName||'—'}</td>
+                  <td style={{color:'var(--warn)',fontWeight:600}}>{fmtD(m.expiryDate)}</td>
+                  <td>
+                    <button className="btn btn-sm btn-outline" title={m.email?'Email renewal reminder':'No email saved'} disabled={!m.email}
+                      onClick={()=>mailtoRenewalReminder(m,settings)}>
+                      <Ic n="mail" s={12}/>
+                    </button>
+                  </td>
+                </tr>)}</tbody>
               </table></div>
           }
         </div>
@@ -2075,11 +2124,12 @@ const Members=({user,searchSeed})=>{
   const[q,setQ]=useState('');
   const[showForm,setShowForm]=useState(false);
   const[editId,setEditId]=useState(null);
-  const[form,setForm]=useState({name:'',email:'',phone:'',planId:'',trainerId:'',startDate:today(),note:''});
+  const[form,setForm]=useState({name:'',email:'',phone:'',address:'',planId:'',trainerId:'',startDate:today(),note:''});
   const[statusFilter,setStatusFilter]=useState('all');
   const plans=S.get(SK.PLANS,[])||[];
   const users=S.get(SK.USERS,[])||[];
   const trainers=users.filter(u=>u.role==='trainer');
+  const settings=S.get(SK.SETTINGS,{})||{};
 
   // Picked up when the global topbar search sends someone here with a query already typed.
   useEffect(()=>{ if(searchSeed?.query!==undefined) setQ(searchSeed.query); },[searchSeed?.token]);
@@ -2095,7 +2145,7 @@ const Members=({user,searchSeed})=>{
     if(editId)all=all.map(m=>m.id===editId?rec:m);
     else all=[...all,rec];
     S.set(SK.MEMBERS,all);setMembers(all);
-    setShowForm(false);setEditId(null);setForm({name:'',email:'',phone:'',planId:'',trainerId:'',startDate:today(),note:''});
+    setShowForm(false);setEditId(null);setForm({name:'',email:'',phone:'',address:'',planId:'',trainerId:'',startDate:today(),note:''});
     toast.success(editId?'Member updated':'Member added');
   };
   const del=id=>{
@@ -2114,7 +2164,7 @@ const Members=({user,searchSeed})=>{
     S.set(SK.MEMBERS,all);setMembers(all);toast.success('Frozen for '+days+' days');
   };
   const startEdit=m=>{
-    setEditId(m.id);setForm({name:m.name,email:m.email||'',phone:m.phone||'',
+    setEditId(m.id);setForm({name:m.name,email:m.email||'',phone:m.phone||'',address:m.address||'',
       planId:m.planId||'',trainerId:m.trainerId||'',startDate:m.startDate||today(),note:m.note||''});
     setShowForm(true);
   };
@@ -2132,7 +2182,7 @@ const Members=({user,searchSeed})=>{
     <div className="page-enter">
       <div className="page-hdr">
         <div><div className="page-title">Members</div><div className="page-sub">{members.length} total · {members.filter(m=>m.status==='active').length} active</div></div>
-        {isAdmin&&<button className="btn btn-primary" onClick={()=>{setShowForm(!showForm);setEditId(null);setForm({name:'',email:'',phone:'',planId:'',trainerId:'',startDate:today(),note:''});}}>
+        {isAdmin&&<button className="btn btn-primary" onClick={()=>{setShowForm(!showForm);setEditId(null);setForm({name:'',email:'',phone:'',address:'',planId:'',trainerId:'',startDate:today(),note:''});}}>
           <Ic n="plus" s={14}/>{showForm?'Cancel':'Add Member'}
         </button>}
       </div>
@@ -2143,6 +2193,7 @@ const Members=({user,searchSeed})=>{
           <div className="field"><label className="field-label">Full Name *</label><input className="field-input" value={form.name} onChange={e=>setForm(p=>({...p,name:e.target.value}))} placeholder="Member name"/></div>
           <div className="field"><label className="field-label">Email</label><input className="field-input" type="email" value={form.email} onChange={e=>setForm(p=>({...p,email:e.target.value}))} placeholder="email@example.com"/></div>
           <div className="field"><label className="field-label">Phone</label><input className="field-input" value={form.phone} onChange={e=>setForm(p=>({...p,phone:e.target.value}))} placeholder="+91 9876543210"/></div>
+          <div className="field" style={{gridColumn:'1/-1'}}><label className="field-label">Address</label><input className="field-input" value={form.address||''} onChange={e=>setForm(p=>({...p,address:e.target.value}))} placeholder="Optional — used for records/reminders"/></div>
           <div className="field"><label className="field-label">Membership Plan</label>
             <select className="field-input" value={form.planId} onChange={e=>setForm(p=>({...p,planId:e.target.value}))}>
               <option value="">— Select Plan —</option>
@@ -2197,6 +2248,7 @@ const Members=({user,searchSeed})=>{
                   {isAdmin&&<td>
                     <div style={{display:'flex',gap:4}}>
                       <button className="btn btn-sm btn-outline" onClick={()=>startEdit(m)} title="Edit"><Ic n="edit" s={12}/></button>
+                      {(m.status==='active'||m.status==='frozen')&&<button className="btn btn-sm btn-outline" title={m.email?'Email renewal reminder':'No email saved'} disabled={!m.email} onClick={()=>mailtoRenewalReminder(m,settings)}><Ic n="mail" s={12}/></button>}
                       <button className="btn btn-sm btn-outline" onClick={()=>freeze(m.id)} title="Freeze" style={{color:'var(--blue)'}}><Ic n="freeze" s={12}/></button>
                       {isSuper&&<button className="btn btn-sm btn-outline" onClick={()=>del(m.id)} style={{color:'var(--red)'}}><Ic n="trash" s={12}/></button>}
                     </div>
@@ -2286,6 +2338,24 @@ const Invoices=({user,searchSeed})=>{
     S.set(SK.INVOICES,allI);setInvoices(allI);
     setPreview(inv);
     toast.success('Invoice '+inv.number+' generated!');
+    // Fire-and-forget: push this member's details to the Google Sheet (if
+    // configured) so the Apps Script reminder automation always has the
+    // latest contact info and expiry date to work from.
+    syncToGoogleSheet({
+      type:'invoice',
+      gymName:settings.name||'',
+      invoiceNumber:inv.number,
+      invoiceDate:inv.date,
+      memberName:inv.memberName,
+      memberEmail:inv.memberEmail||'',
+      memberPhone:inv.memberPhone||'',
+      memberAddress:memberRec.address||'',
+      planName:inv.planName,
+      startDate:inv.startDate,
+      expiryDate:inv.expiryDate,
+      total:inv.total,
+      gstEnabled:inv.gstEnabled
+    },settings);
   };
 
   // Superadmin sees every invoice; everyone else only sees invoices they
@@ -2865,6 +2935,15 @@ const GymSettings=({user,onSaved})=>{
             <label className="field-label">WhatsApp Number</label>
             <input className="field-input" value={form.whatsapp||''} onChange={e=>setForm(p=>({...p,whatsapp:e.target.value}))} placeholder="+91 98765 43210"/>
             <div style={{fontSize:11,color:'var(--text3)',marginTop:5}}>Your gym's own WhatsApp contact — shown to members. Invoices are sent to each member's own saved phone number.</div>
+          </div>
+          <div className="field" style={{gridColumn:'1/-1'}}>
+            <label className="field-label">Google Sheet Sync URL (for renewal reminder emails)</label>
+            <input className="field-input" value={form.sheetWebhookUrl||''} onChange={e=>setForm(p=>({...p,sheetWebhookUrl:e.target.value}))} placeholder="https://script.google.com/macros/s/.../exec"/>
+            <div style={{fontSize:11,color:'var(--text3)',marginTop:5,lineHeight:1.6}}>
+              Optional. Paste your deployed Google Apps Script Web App URL here — every invoice you generate will
+              automatically send that member's name, contact info and expiry date to your Google Sheet, so a script
+              there can email renewal reminders automatically. See the setup guide provided with this app.
+            </div>
           </div>
           <div className="field" style={{gridColumn:'1/-1'}}><label className="field-label">Bank Details</label><textarea className="field-input" rows={2} value={form.bankDetails||''} onChange={e=>setForm(p=>({...p,bankDetails:e.target.value}))} placeholder="Account No, IFSC, Bank"/></div>
           <div className="field" style={{gridColumn:'1/-1'}}><label className="field-label">Terms &amp; Conditions (printed on invoice)</label><textarea className="field-input" rows={3} value={form.terms||''} onChange={e=>setForm(p=>({...p,terms:e.target.value}))}/></div>
